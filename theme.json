@@ -1,0 +1,17 @@
+{
+  "id": "soundcloudWidget",
+  "name": "SoundCloud Widget",
+  "description": "Floating SoundCloud mini-player widget.",
+  "author": "tidex",
+  "version": "1.0.0",
+  "scripts": {
+    "soundcloud-widget.uc.js": {
+      "name": "Core script",
+      "description": "Widget + audio tap.",
+      "include": ["chrome://browser/content/browser.xhtml"]
+    }
+  },
+  "tags": [],
+  "createdAt": "2026-08-31",
+  "updatedAt": "2026-08-31"
+}
