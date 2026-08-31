@@ -3,7 +3,10 @@
 // @include        main
 // ==/UserScript==
 
-UC_API.Runtime.startupFinished().then(() => {
+console.log("[SC-WIDGET] script file loaded/executed by Sine");
+
+function scWidgetInit() {
+  console.log("[SC-WIDGET] scWidgetInit() running");
   const container = document.querySelector(".zen-workspace-empty-space");
 
   if (!container) {
@@ -510,10 +513,11 @@ UC_API.Runtime.startupFinished().then(() => {
   // ==================================================
   // Equalizer: wygładzone renderowanie 60fps
   // Dane wejściowe (targetBars/targetGlow) przychodzą z karty SC
-  // przez SCWidget:AudioData (patrz FRAME_SCRIPT + onAudioData niżej).
-  // Jeśli dane nie napływają (np. hook do Web Audio się nie udał),
-  // a utwór gra - włącza się subtelna, syntetyczna animacja "oddechu",
-  // żeby widget nigdy nie wyglądał na martwy.
+  // przez SCWidget:AudioData (patrz FRAME_SCRIPT + globalny listener niżej).
+  // Jeśli dane nie napływają (np. tap się nie udał / strona jeszcze
+  // nie połączyła żadnego node'a z destination), a utwór gra - włącza
+  // się subtelna, syntetyczna animacja "oddechu", żeby widget nigdy
+  // nie wyglądał na martwy.
   // ==================================================
 
   let targetBars = new Array(EQ_BAR_COUNT).fill(0);
@@ -566,7 +570,14 @@ UC_API.Runtime.startupFinished().then(() => {
   requestAnimationFrame(animateEq);
 
   // ==================================================
-  // Frame script wstrzykiwany do procesu treści karty SC
+  // Frame script wstrzykiwany do procesu treści KAŻDEJ karty
+  // (globalnie, patrz window.messageManager.loadFrameScript(url, true)
+  // na końcu pliku). Musi być globalny i załadowany WCZEŚNIE, bo
+  // audio-tap poniżej działa tylko jeśli zdąży załatać
+  // AudioNode.prototype.connect zanim skrypt SoundClouda zbuduje
+  // swój graf audio (SoundCloud gra przez Web Audio API bezpośrednio -
+  // buforami przez AudioBufferSourceNode/AudioWorkletNode, NIE przez
+  // <audio>, więc nie ma czego łapać przez createMediaElementSource).
   // ==================================================
 
   const FRAME_SCRIPT = `
@@ -598,8 +609,6 @@ UC_API.Runtime.startupFinished().then(() => {
         const artworkEl = content.document.querySelector('.playbackSoundBadge .sc-artwork[style*="background-image"]');
         const volumeBtn = content.document.querySelector(".volume__button");
 
-        // Preferuj czysty tekst z linku/tytułu (bez aria-label typu "Current track: X"),
-        // sięgając po najbardziej wewnętrzny element tekstowy jeśli to możliwe.
         let rawTitle = null;
         if (titleBadge) {
           const innerLink = titleBadge.querySelector("a, span");
@@ -655,9 +664,6 @@ UC_API.Runtime.startupFinished().then(() => {
             clientY: targetY
           };
 
-          // SoundCloud's timeline drag handling now relies on the Pointer
-          // Events API rather than plain mouse events, so fire both to
-          // stay compatible regardless of which one it listens for.
           const downOpts = Object.assign({}, baseOpts, {
             pointerId: 1,
             pointerType: "mouse",
@@ -684,71 +690,126 @@ UC_API.Runtime.startupFinished().then(() => {
         sendAsyncMessage("SCWidget:SeekReply", getInfo());
       });
 
-      // ---- Audio-reactive equalizer ----
-      // Podpina AnalyserNode pod pierwszy znaleziony element <audio> na stronie
-      // i co 50ms wysyła uśrednione dane częstotliwości do chrome (SCWidget:AudioData).
-      // Musi być zgodne z EQ_BAR_COUNT w skrypcie chrome!
+      // ---- Audio-reactive equalizer: real tap via AudioNode.connect ----
+      //
+      // SoundCloud plays audio purely through the Web Audio API (buffers
+      // via AudioBufferSourceNode / AudioWorkletNode), there is no
+      // <audio> element to hook. Instead we patch AudioNode.prototype.connect
+      // in the CONTENT window, BEFORE SoundCloud's own bundle runs, so
+      // that whenever any node connects straight to the AudioContext's
+      // destination, we transparently also tap it into an AnalyserNode.
+      // This must be installed on DOMWindowCreated (fires before page
+      // scripts execute) - patching it later (e.g. on first message from
+      // chrome) is too late, since the graph is already wired by then.
+      //
+      // Must be kept in sync with EQ_BAR_COUNT in the chrome-side script!
       var EQ_BAR_COUNT = 14;
-      var audioCtx = null;
-      var analyserNode = null;
-      var freqData = null;
-      var hookedAudioEl = null;
+      var activeAnalyser = null;
+      var activeFreqData = null;
 
-      function tryHookAudio() {
-        var el = content.document.querySelector("audio");
-        if (!el || el === hookedAudioEl || el.__scWidgetHooked) return;
+      function installAudioTap(win) {
         try {
-          if (!audioCtx) {
-            var AC = content.AudioContext || content.webkitAudioContext;
-            audioCtx = new AC();
+          var unwrapped = win.wrappedJSObject;
+          var AudioNodeCtor = unwrapped.AudioNode;
+          var DestinationCtor = unwrapped.AudioDestinationNode;
+          if (!AudioNodeCtor || !DestinationCtor) return;
+          if (AudioNodeCtor.prototype.__scWidgetTapped) return;
+
+          var originalConnect = AudioNodeCtor.prototype.connect;
+
+          function patchedConnect() {
+            try {
+              var dest = arguments[0];
+              if (dest instanceof DestinationCtor) {
+                var ctx = this.context;
+                var analyser = ctx.__scWidgetAnalyser;
+                if (!analyser) {
+                  analyser = ctx.createAnalyser();
+                  analyser.fftSize = 64;
+                  analyser.smoothingTimeConstant = 0.6;
+                  ctx.__scWidgetAnalyser = analyser;
+                  activeAnalyser = analyser;
+                  activeFreqData = new Uint8Array(analyser.frequencyBinCount);
+                  console.log("[SC-WIDGET][audio] Zlapano polaczenie z destination - tap aktywny.");
+                }
+                // Dopiete rownolegle, nie zmienia realnej sciezki dzwieku.
+                originalConnect.call(this, analyser);
+              }
+            } catch (e) {
+              console.log("[SC-WIDGET][audio] Blad w patched connect: " + (e && e.message));
+            }
+            return originalConnect.apply(this, arguments);
           }
-          var source = audioCtx.createMediaElementSource(el);
-          var an = audioCtx.createAnalyser();
-          an.fftSize = 64;
-          an.smoothingTimeConstant = 0.6;
-          source.connect(an);
-          an.connect(audioCtx.destination);
-          analyserNode = an;
-          freqData = new Uint8Array(an.frequencyBinCount);
-          hookedAudioEl = el;
-          el.__scWidgetHooked = true;
-          console.log("[SC-WIDGET] Web Audio podpiete do <audio>.");
+
+          Object.defineProperty(AudioNodeCtor.prototype, "connect", {
+            value: exportFunction(patchedConnect, unwrapped),
+            writable: true,
+            configurable: true
+          });
+          AudioNodeCtor.prototype.__scWidgetTapped = true;
+          console.log("[SC-WIDGET][audio] AudioNode.connect zapatchowany przed skryptami strony.");
         } catch (e) {
-          console.log("[SC-WIDGET] Nie udalo sie podpiac Web Audio: " + e);
+          console.log("[SC-WIDGET][audio] installAudioTap nieudany: " + (e && e.message));
         }
       }
 
-      function sendAudioFrame() {
-        if (!analyserNode) return;
-        if (audioCtx.state === "suspended") {
-          audioCtx.resume().catch(function () {});
+      addEventListener("DOMWindowCreated", function (event) {
+        try {
+          var doc = event.target;
+          var win = doc && doc.defaultView;
+          if (!win || !win.location || !win.location.host) return;
+          if (win.location.host.indexOf("soundcloud.com") === -1) return;
+          // Nowy dokument = nowy AudioContext w przyszlosci -> zresetuj tap.
+          activeAnalyser = null;
+          activeFreqData = null;
+          installAudioTap(win);
+        } catch (e) {
+          console.log("[SC-WIDGET][audio] DOMWindowCreated handler blad: " + (e && e.message));
         }
-        analyserNode.getByteFrequencyData(freqData);
+      }, true);
+
+      function sendAudioFrame() {
+        if (!activeAnalyser) return;
+        activeAnalyser.getByteFrequencyData(activeFreqData);
         var bars = new Array(EQ_BAR_COUNT);
-        var bins = freqData.length;
+        var bins = activeFreqData.length;
         var sum = 0;
         for (var i = 0; i < EQ_BAR_COUNT; i++) {
           var start = Math.floor((i * bins) / EQ_BAR_COUNT);
           var end = Math.max(start + 1, Math.floor(((i + 1) * bins) / EQ_BAR_COUNT));
           var bucketSum = 0;
-          for (var j = start; j < end; j++) bucketSum += freqData[j];
+          for (var j = start; j < end; j++) bucketSum += activeFreqData[j];
           var avg = bucketSum / (end - start) / 255;
           bars[i] = Math.pow(avg, 0.6);
           sum += avg;
         }
-        sendAsyncMessage("SCWidget:AudioData", { bars: bars, level: sum / EQ_BAR_COUNT });
+        var level = sum / EQ_BAR_COUNT;
+        sendAsyncMessage("SCWidget:AudioData", { bars: bars, level: level });
+
+        eqDebugTick++;
+        if (eqDebugTick % 40 === 0) {
+          console.log(
+            "[SC-WIDGET][audio] plynie: level=" + level.toFixed(3) +
+            (level < 0.01 ? "  <-- prawie 0: sprawdz czy dzwiek faktycznie gra" : "")
+          );
+        }
       }
 
-      var eqTick = 0;
+      var eqDebugTick = 0;
       content.setInterval(function () {
-        eqTick++;
-        if (!hookedAudioEl || hookedAudioEl !== content.document.querySelector("audio")) {
-          if (!hookedAudioEl || eqTick % 20 === 0) tryHookAudio();
-        }
         sendAudioFrame();
       }, 50);
 
-      tryHookAudio();
+      // Jesli skrypt zaladowal sie DO KARTY, ktora jest juz na soundcloud.com
+      // (np. wczytanie global-scriptu po starcie przegladarki dla juz
+      // otwartej karty), zainstaluj tap od razu - i tak i tak zlapiemy tylko
+      // przyszle connect() (np. po zmianie utworu), ale to lepsze niz nic.
+      try {
+        if (content && content.location && content.location.host &&
+            content.location.host.indexOf("soundcloud.com") !== -1) {
+          installAudioTap(content);
+        }
+      } catch (e) {}
     })();
   `;
 
@@ -763,7 +824,26 @@ UC_API.Runtime.startupFinished().then(() => {
     return null;
   }
 
-  const scriptLoadedBrowsers = new WeakSet();
+  // ---- Globalne wczytanie frame scriptu ----
+  // WAŻNE: musi być załadowany globalnie (drugi argument `true`) i od razu
+  // przy starcie, a nie leniwie przy pierwszej wysyłce wiadomości - inaczej
+  // DOMWindowCreated w frame scripcie zdąży ominąć pierwsze wejście na
+  // soundcloud.com (strona zdąży zbudować swój graf audio, zanim w ogóle
+  // wstrzykniemy patch). Dzięki `true` skrypt trafia do KAŻDEJ obecnej i
+  // przyszłej karty od razu.
+  const FRAME_SCRIPT_URL = "data:application/javascript," + encodeURIComponent(FRAME_SCRIPT);
+  window.messageManager.loadFrameScript(FRAME_SCRIPT_URL, true);
+
+  // Stały, globalny nasłuch danych equalizera - filtrujemy po tym, czy
+  // nadawca to aktualnie znaleziona karta SC (na wypadek kilku otwartych
+  // kart SoundClouda naraz).
+  window.messageManager.addMessageListener("SCWidget:AudioData", (msg) => {
+    const currentTab = findSoundCloudTab();
+    if (!currentTab || currentTab.linkedBrowser !== msg.target) return;
+    lastAudioMsgTime = Date.now();
+    targetBars = msg.data.bars || new Array(EQ_BAR_COUNT).fill(0);
+    targetGlow = typeof msg.data.level === "number" ? msg.data.level : 0;
+  });
 
   function sendToSoundCloudTab(messageName, replyName, onReply, payload) {
     const tab = findSoundCloudTab();
@@ -774,21 +854,6 @@ UC_API.Runtime.startupFinished().then(() => {
 
     const browser = tab.linkedBrowser;
     const mm = browser.messageManager;
-
-    if (!scriptLoadedBrowsers.has(browser)) {
-      const dataURL = "data:application/javascript," + encodeURIComponent(FRAME_SCRIPT);
-      mm.loadFrameScript(dataURL, false);
-      scriptLoadedBrowsers.add(browser);
-
-      // Stały nasłuch danych equalizera dla tej konkretnej karty.
-      mm.addMessageListener("SCWidget:AudioData", (msg) => {
-        const currentTab = findSoundCloudTab();
-        if (!currentTab || currentTab.linkedBrowser !== browser) return;
-        lastAudioMsgTime = Date.now();
-        targetBars = msg.data.bars || new Array(EQ_BAR_COUNT).fill(0);
-        targetGlow = typeof msg.data.level === "number" ? msg.data.level : 0;
-      });
-    }
 
     mm.addMessageListener(replyName, function onReplyWrapper(msg) {
       mm.removeMessageListener(replyName, onReplyWrapper);
@@ -861,4 +926,21 @@ UC_API.Runtime.startupFinished().then(() => {
       updateFromInfo(data);
     }, { percent: percent });
   });
-});
+}
+
+// ---- Trigger scWidgetInit, logging exactly which path we took ----
+try {
+  if (typeof UC_API !== "undefined" && UC_API && UC_API.Runtime && UC_API.Runtime.startupFinished) {
+    console.log("[SC-WIDGET] UC_API found, using UC_API.Runtime.startupFinished()");
+    UC_API.Runtime.startupFinished().then(scWidgetInit);
+  } else {
+    console.log("[SC-WIDGET] UC_API NOT available in this context - falling back");
+    if (document.readyState === "complete") {
+      scWidgetInit();
+    } else {
+      window.addEventListener("load", scWidgetInit, { once: true });
+    }
+  }
+} catch (e) {
+  console.log("[SC-WIDGET] top-level error while triggering init: " + (e && e.message));
+}
