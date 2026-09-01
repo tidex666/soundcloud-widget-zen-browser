@@ -48,15 +48,17 @@ function scWidgetInit() {
     font-family: system-ui, -apple-system, sans-serif;
 
     /* --- Mica-friendly look ---
-       No painted gradient sheen and only a light tint, so the OS
-       Mica material behind the window shows through instead of
-       being covered by an opaque "glass card". */
-    background: rgba(30, 30, 46, 0.22);
+       No painted gradient sheen and a color-neutral tint (no blue/
+       purple cast), so it blends with whatever Mica/accent color
+       the browser itself is using instead of standing out. */
+    background: rgba(0, 0, 0, 0.25);
     backdrop-filter: blur(6px) saturate(120%);
     -moz-backdrop-filter: blur(6px) saturate(120%);
     border: 1px solid rgba(255, 255, 255, 0.10);
     border-radius: 16px;
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.20);
+    z-index: 1;
+    transition: opacity 0.12s ease;
   `;
 
   const styleTag = document.createElement("style");
@@ -924,6 +926,30 @@ function scWidgetInit() {
       updateFromInfo(data);
     }, { percent: percent });
   });
+
+  // ---- Nie zasłaniaj listy podpowiedzi paska adresu ----
+  // Pasek adresu (urlbar) renderuje swoją listę wyników jako panel
+  // wewnątrz tego samego okna, więc nasz widget (position: absolute)
+  // potrafi się na nim rysować. Chowamy widget na czas otwarcia listy
+  // i pokazujemy z powrotem po jej zamknięciu.
+  try {
+    const urlbarPanel = window.gURLBar && window.gURLBar.view && window.gURLBar.view.panel;
+    if (urlbarPanel) {
+      urlbarPanel.addEventListener("popupshowing", () => {
+        widgetDiv.style.opacity = "0";
+        widgetDiv.style.pointerEvents = "none";
+      });
+      urlbarPanel.addEventListener("popuphidden", () => {
+        widgetDiv.style.opacity = "1";
+        widgetDiv.style.pointerEvents = "";
+      });
+      console.log("[SC-WIDGET] Podpięto pod eventy panelu urlbar (popupshowing/popuphidden).");
+    } else {
+      console.log("[SC-WIDGET] gURLBar.view.panel niedostępny - pomijam obsługę zasłaniania listy.");
+    }
+  } catch (e) {
+    console.log("[SC-WIDGET] Blad przy podpinaniu eventow urlbar: " + (e && e.message));
+  }
 }
 
 // ---- Trigger scWidgetInit, logging exactly which path we took ----
