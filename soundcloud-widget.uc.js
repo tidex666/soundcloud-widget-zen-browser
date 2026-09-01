@@ -47,18 +47,16 @@ function scWidgetInit() {
     -moz-window-dragging: no-drag;
     font-family: system-ui, -apple-system, sans-serif;
 
-    /* --- Glossy / transparent look --- */
-    background:
-      linear-gradient(160deg, rgba(255,255,255,0.10) 0%, rgba(255,255,255,0.02) 40%, rgba(255,255,255,0.00) 60%),
-      rgba(30, 30, 46, 0.55);
-    backdrop-filter: blur(22px) saturate(160%);
-    -moz-backdrop-filter: blur(22px) saturate(160%);
-    border: 1px solid rgba(255, 255, 255, 0.14);
-    border-top-color: rgba(255, 255, 255, 0.28);
+    /* --- Mica-friendly look ---
+       No painted gradient sheen and only a light tint, so the OS
+       Mica material behind the window shows through instead of
+       being covered by an opaque "glass card". */
+    background: rgba(30, 30, 46, 0.22);
+    backdrop-filter: blur(6px) saturate(120%);
+    -moz-backdrop-filter: blur(6px) saturate(120%);
+    border: 1px solid rgba(255, 255, 255, 0.10);
     border-radius: 16px;
-    box-shadow:
-      0 10px 24px rgba(0, 0, 0, 0.35),
-      inset 0 1px 0 rgba(255, 255, 255, 0.12);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.20);
   `;
 
   const styleTag = document.createElement("style");
