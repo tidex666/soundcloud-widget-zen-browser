@@ -447,9 +447,21 @@ function scWidgetInit() {
   }
 
   // Usuwa domyślny prefiks SoundClouda typu "Current track: ", "Now playing: " itp.
+  // Usuwa też sklejony duplikat tytułu - SoundCloud w tytule utworu
+  // czasem ma dwa zagnieżdżone elementy z tym samym tekstem (ukryty +
+  // widoczny, pod ellipsis/SEO), przez co textContent daje "TytułTytuł".
   function cleanTrackTitle(raw) {
     if (!raw) return raw;
-    return raw.replace(/^(current track|now playing)\s*:\s*/i, "").trim();
+    let title = raw.replace(/^(current track|now playing)\s*:\s*/i, "").trim();
+    const half = title.length / 2;
+    if (Number.isInteger(half) && half > 0) {
+      const firstHalf = title.slice(0, half);
+      const secondHalf = title.slice(half);
+      if (firstHalf === secondHalf) {
+        title = firstHalf;
+      }
+    }
+    return title;
   }
 
   let lastArtworkUrl = null;
