@@ -1,9 +1,9 @@
 {
   "id": "soundcloudWidget",
   "name": "SoundCloud Widget",
-  "description": "Floating SoundCloud mini-player widget.",
+  "description": "SoundCloud mini-player widget for the Zen sidebar.",
   "author": "tidex",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "scripts": {
     "soundcloud-widget.uc.js": {
       "name": "Core script",
@@ -13,5 +13,5 @@
   },
   "tags": [],
   "createdAt": "2026-08-31",
-  "updatedAt": "2026-08-31"
+  "updatedAt": "2026-09-25"
 }

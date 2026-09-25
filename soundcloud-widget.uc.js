@@ -1,114 +1,562 @@
 // ==UserScript==
-// @name           soundcloud-widget-test
+// @name           soundcloud-widget
 // @include        main
 // ==/UserScript==
+//
+// v1.1.0
+//  - Widget now lives in normal layout flow above Zen's sidebar footer
+//    (reserves its own space, tabs scroll above it instead of going under).
+//  - Minimize / expand (state remembered in pref "sc-widget.minimized").
+//  - Real audio-reactive EQ: taps SoundCloud's <audio> element (which is
+//    what SoundCloud actually plays through, via MSE/HLS) instead of only
+//    hooking Web Audio connect(). The Web Audio hook is kept as a backup.
 
-console.log("[SC-WIDGET] script file loaded/executed by Sine");
+console.log("[SC-WIDGET] script file loaded");
 
-function scWidgetInit() {
-  console.log("[SC-WIDGET] scWidgetInit() running");
-  const container = document.querySelector(".zen-workspace-empty-space");
+// =====================================================================
+// FRAME SCRIPT (runs inside every tab's content process).
+// Written as a real function and serialized with toString(), so there is
+// no escaping hell. It must NOT reference anything from the chrome scope.
+// =====================================================================
+function scFrameScript(EQ_BAR_COUNT) {
+  "use strict";
 
-  if (!container) {
-    console.log("[SC-WIDGET] Nie znaleziono .zen-workspace-empty-space :(");
-    return;
+  function log(m) {
+    try { console.log("[SC-WIDGET][audio] " + m); } catch (e) {}
   }
 
-  container.style.position = "relative";
+  function isSoundCloud(win) {
+    try {
+      return !!(win && win.location && win.location.host &&
+        win.location.host.indexOf("soundcloud.com") !== -1);
+    } catch (e) {
+      return false;
+    }
+  }
 
-  // ---- Paleta (Catppuccin Mocha) ----
+  // ------------------------------------------------------------------
+  // Player controls (unchanged behaviour)
+  // ------------------------------------------------------------------
+  function dispatchClick(selector) {
+    const btn = content.document.querySelector(selector);
+    if (btn) {
+      btn.dispatchEvent(new content.MouseEvent("click", { bubbles: true, cancelable: true, view: content }));
+    }
+    return !!btn;
+  }
+
+  function extractArtworkUrl(el) {
+    if (!el) return null;
+    const bg = el.style.backgroundImage || "";
+    const start = bg.indexOf("url(");
+    if (start === -1) return null;
+    let url = bg.slice(start + 4, bg.lastIndexOf(")")).trim();
+    if (url[0] === '"' || url[0] === "'") url = url.slice(1, -1);
+    return url || null;
+  }
+
+  function getInfo() {
+    const d = content.document;
+    const playBtn = d.querySelector(".playControls__play");
+    const titleBadge = d.querySelector(".playbackSoundBadge__title");
+    const progressWrapper = d.querySelector(".playbackTimeline__progressWrapper");
+    const artworkEl = d.querySelector('.playbackSoundBadge .sc-artwork[style*="background-image"]');
+    const volumeBtn = d.querySelector(".volume__button");
+
+    let rawTitle = null;
+    if (titleBadge) {
+      const inner = titleBadge.querySelector("a, span");
+      rawTitle = inner ? inner.textContent.trim() : titleBadge.textContent.trim();
+    }
+
+    return {
+      found: !!playBtn,
+      playTitle: playBtn ? playBtn.title : null,
+      trackTitle: rawTitle,
+      artworkUrl: extractArtworkUrl(artworkEl),
+      currentTime: progressWrapper ? parseFloat(progressWrapper.getAttribute("aria-valuenow")) : 0,
+      duration: progressWrapper ? parseFloat(progressWrapper.getAttribute("aria-valuemax")) : 0,
+      muted: volumeBtn ? volumeBtn.innerHTML.includes("13.4697 10.5303") : false
+    };
+  }
+
+  addMessageListener("SCWidget:GetInfo", function () {
+    sendAsyncMessage("SCWidget:GetInfoReply", getInfo());
+  });
+
+  addMessageListener("SCWidget:TogglePlay", function () {
+    dispatchClick(".playControls__play");
+    resumeTapContext();
+    sendAsyncMessage("SCWidget:TogglePlayReply", getInfo());
+  });
+
+  addMessageListener("SCWidget:Next", function () {
+    const clicked = dispatchClick(".playControls__next");
+    sendAsyncMessage("SCWidget:NextReply", { clicked: clicked });
+  });
+
+  addMessageListener("SCWidget:Prev", function () {
+    const clicked = dispatchClick(".playControls__prev");
+    sendAsyncMessage("SCWidget:PrevReply", { clicked: clicked });
+  });
+
+  addMessageListener("SCWidget:ToggleMute", function () {
+    dispatchClick(".volume__button");
+    sendAsyncMessage("SCWidget:ToggleMuteReply", getInfo());
+  });
+
+  addMessageListener("SCWidget:Seek", function (msg) {
+    const wrapper = content.document.querySelector(".playbackTimeline__progressWrapper");
+    if (wrapper) {
+      const rect = wrapper.getBoundingClientRect();
+      const base = {
+        bubbles: true, cancelable: true, view: content,
+        clientX: rect.left + rect.width * msg.data.percent,
+        clientY: rect.top + rect.height / 2
+      };
+      const down = Object.assign({}, base, { pointerId: 1, pointerType: "mouse", isPrimary: true, button: 0, buttons: 1 });
+      const up = Object.assign({}, base, { pointerId: 1, pointerType: "mouse", isPrimary: true, button: 0, buttons: 0 });
+      wrapper.dispatchEvent(new content.PointerEvent("pointerdown", down));
+      wrapper.dispatchEvent(new content.MouseEvent("mousedown", base));
+      wrapper.dispatchEvent(new content.PointerEvent("pointermove", up));
+      wrapper.dispatchEvent(new content.MouseEvent("mousemove", base));
+      wrapper.dispatchEvent(new content.PointerEvent("pointerup", up));
+      wrapper.dispatchEvent(new content.MouseEvent("mouseup", base));
+      wrapper.dispatchEvent(new content.MouseEvent("click", base));
+    }
+    sendAsyncMessage("SCWidget:SeekReply", getInfo());
+  });
+
+  // ------------------------------------------------------------------
+  // AUDIO TAP
+  //
+  // Why the old version only ever showed the fallback animation:
+  // SoundCloud does NOT play through Web Audio. It plays through a
+  // (detached) <audio> element fed by MediaSource (HLS). So the patched
+  // AudioNode.connect() was never called -> no analyser -> no data.
+  // (On top of that, the `instanceof AudioDestinationNode` check fails
+  // across the Xray boundary, so even Web Audio pages wouldn't match.)
+  //
+  // New approach:
+  //  1. Hook HTMLMediaElement.prototype.play in the page, so we catch the
+  //     audio element even though it's never inserted in the DOM.
+  //  2. Route it: element -> MediaElementSource -> Analyser -> speakers.
+  //     Sound is unchanged, we just get to look at it.
+  //  3. Keep a (fixed) AudioNode.connect hook as backup.
+  //
+  // Safety guards so we never make the music go silent:
+  //  - only tap blob:/same-origin/CORS sources (cross-origin without CORS
+  //    would output silence through Web Audio),
+  //  - only create the AudioContext once the page has had a real user
+  //    click (otherwise autoplay policy could leave it suspended).
+  // ------------------------------------------------------------------
+  let Timer = null;
+  try {
+    Timer = ChromeUtils.importESModule("resource://gre/modules/Timer.sys.mjs");
+  } catch (e) {}
+
+  let tap = null;        // { doc, ctx, analyser, freq }
+  let graphTaps = [];    // analysers on the page's own AudioContexts
+
+  function makeAnalyser(ctx) {
+    const a = ctx.createAnalyser();
+    a.fftSize = 256;
+    a.smoothingTimeConstant = 0.72;
+    return { analyser: a, freq: new Uint8Array(a.frequencyBinCount) };
+  }
+
+  function ensureTap(win) {
+    const doc = win.document;
+    if (tap && tap.doc === doc) return tap;
+    const ctx = new win.AudioContext();
+    const a = makeAnalyser(ctx);
+    a.analyser.connect(ctx.destination);
+    tap = { doc: doc, ctx: ctx, analyser: a.analyser, freq: a.freq };
+    log("AudioContext created (state=" + ctx.state + ")");
+    return tap;
+  }
+
+  function resumeTapContext() {
+    try {
+      if (tap && tap.ctx.state === "suspended") tap.ctx.resume();
+    } catch (e) {}
+  }
+
+  function tapElement(el, win) {
+    try {
+      if (!el || el.__scWidgetTapped) return;
+
+      const src = String(el.currentSrc || el.src || "");
+      if (!src) return; // no source yet, we'll get it on "playing"
+
+      let origin = "";
+      try { origin = win.location.origin; } catch (e) {}
+      const safe = src.indexOf("blob:") === 0 ||
+        (origin && src.indexOf(origin) === 0) ||
+        !!el.crossOrigin;
+      if (!safe) {
+        el.__scWidgetTapped = true; // don't retry forever
+        log("skipping cross-origin media without CORS (would go silent): " + src.slice(0, 80));
+        return;
+      }
+
+      const ua = win.navigator && win.navigator.userActivation;
+      if (ua && !ua.hasBeenActive) {
+        log("page has no user activation yet, will tap on next play");
+        return;
+      }
+
+      const t = ensureTap(win);
+      const node = t.ctx.createMediaElementSource(el);
+      node.connect(t.analyser);
+      el.__scWidgetTapped = true;
+      resumeTapContext();
+      log("media element tapped, EQ is live");
+    } catch (e) {
+      // e.g. page already made its own MediaElementSource -> connect hook covers that
+      if (el) el.__scWidgetTapped = true;
+      log("tapElement failed: " + (e && e.message));
+    }
+  }
+
+  function watchElement(el, win) {
+    try {
+      if (!el || el.__scWidgetWatched) return;
+      el.__scWidgetWatched = true;
+      el.addEventListener("playing", function () { tapElement(el, win); });
+    } catch (e) {}
+  }
+
+  function installHooks(win) {
+    if (!isSoundCloud(win)) return;
+    let uw;
+    try { uw = win.wrappedJSObject; } catch (e) { return; }
+    if (!uw) return;
+
+    // 1) HTMLMediaElement.play (catches detached <audio> too)
+    try {
+      const proto = uw.HTMLMediaElement && uw.HTMLMediaElement.prototype;
+      if (proto && !proto.__scWidgetPlayHooked) {
+        const origPlay = proto.play;
+        const hookedPlay = function () {
+          try {
+            watchElement(this, win);
+            tapElement(this, win);
+            resumeTapContext();
+          } catch (e) {}
+          return origPlay.apply(this, arguments);
+        };
+        Object.defineProperty(proto, "play", {
+          value: exportFunction(hookedPlay, uw),
+          writable: true,
+          configurable: true
+        });
+        proto.__scWidgetPlayHooked = true;
+        log("HTMLMediaElement.play hooked");
+      }
+    } catch (e) {
+      log("play hook failed: " + (e && e.message));
+    }
+
+    // 2) Backup: AudioNode.connect (for anything going through Web Audio)
+    try {
+      const nproto = uw.AudioNode && uw.AudioNode.prototype;
+      if (nproto && !nproto.__scWidgetConnectHooked) {
+        const origConnect = nproto.connect;
+        const hookedConnect = function (dest) {
+          try {
+            const ctx = this.context;
+            if (dest && ctx && dest === ctx.destination && !(tap && tap.ctx === ctx)) {
+              let g = ctx.__scWidgetGraphTap;
+              if (!g) {
+                g = makeAnalyser(ctx);
+                ctx.__scWidgetGraphTap = g;
+                graphTaps.push(g);
+                log("page AudioContext tapped (backup path)");
+              }
+              this.connect(g.analyser); // Xray call -> native, no recursion
+            }
+          } catch (e) {}
+          return origConnect.apply(this, arguments);
+        };
+        Object.defineProperty(nproto, "connect", {
+          value: exportFunction(hookedConnect, uw),
+          writable: true,
+          configurable: true
+        });
+        nproto.__scWidgetConnectHooked = true;
+      }
+    } catch (e) {
+      log("connect hook failed: " + (e && e.message));
+    }
+
+    // 3) In-DOM media elements
+    try {
+      const doc = win.document;
+      if (doc && !doc.__scWidgetListening) {
+        doc.__scWidgetListening = true;
+        win.addEventListener("playing", function (e) { tapElement(e.target, win); }, true);
+      }
+    } catch (e) {}
+  }
+
+  function scanForMedia() {
+    try {
+      const els = content.document.querySelectorAll("audio, video");
+      for (const el of els) {
+        watchElement(el, content);
+        if (!el.paused) tapElement(el, content);
+      }
+    } catch (e) {}
+  }
+
+  addEventListener("DOMWindowCreated", function (event) {
+    try {
+      const doc = event.target;
+      const win = doc && doc.defaultView;
+      if (!win || !isSoundCloud(win)) return;
+      if (win === content) {
+        tap = null;
+        graphTaps = [];
+      }
+      installHooks(win);
+    } catch (e) {}
+  }, true);
+
+  // Tab was already on soundcloud.com when this script got loaded
+  // (e.g. session restore). Hooks catch the next play()/track change.
+  try {
+    if (isSoundCloud(content)) {
+      installHooks(content);
+      scanForMedia();
+    }
+  } catch (e) {}
+
+  // ------------------------------------------------------------------
+  // Frequency -> bars (log-spaced so the right side isn't dead)
+  // ------------------------------------------------------------------
+  function computeBars(freq) {
+    const bins = freq.length;
+    const minB = 2;
+    const maxB = Math.max(minB + EQ_BAR_COUNT, Math.floor(bins * 0.75));
+    const ratio = maxB / minB;
+    const bars = new Array(EQ_BAR_COUNT);
+    let sum = 0;
+    let prevEnd = minB;
+    for (let i = 0; i < EQ_BAR_COUNT; i++) {
+      const s = prevEnd;
+      let e = Math.floor(minB * Math.pow(ratio, (i + 1) / EQ_BAR_COUNT));
+      if (e <= s) e = s + 1;
+      prevEnd = e;
+      let total = 0;
+      let peak = 0;
+      for (let j = s; j < e && j < bins; j++) {
+        const v = freq[j];
+        total += v;
+        if (v > peak) peak = v;
+      }
+      const v = (total / (e - s) / 255) * 0.6 + (peak / 255) * 0.4;
+      bars[i] = Math.min(1, Math.pow(v, 0.75) * (0.85 + i * 0.025));
+      sum += v;
+    }
+    return { bars: bars, level: sum / EQ_BAR_COUNT };
+  }
+
+  // Chrome-side timer (Timer.sys.mjs) so a background SoundCloud tab
+  // doesn't get its timers throttled to 1/s like page timers do.
+  const schedule = Timer ? Timer.setTimeout : function (f, ms) {
+    try { return content.setTimeout(f, ms); } catch (e) { return 0; }
+  };
+
+  let tick = 0;
+  function frame() {
+    let next = 1000;
+    try {
+      if (!content) return; // tab is gone -> stop the loop
+      tick++;
+      if (isSoundCloud(content)) {
+        if (!tap && tick % 5 === 0) scanForMedia();
+
+        const sources = [];
+        if (tap) sources.push(tap);
+        for (const g of graphTaps) sources.push(g);
+
+        if (sources.length) {
+          next = 50;
+          let best = null;
+          for (const s of sources) {
+            try {
+              s.analyser.getByteFrequencyData(s.freq);
+              const r = computeBars(s.freq);
+              if (!best || r.level > best.level) best = r;
+            } catch (e) {}
+          }
+          if (best) {
+            sendAsyncMessage("SCWidget:AudioData", best);
+            if (tick % 200 === 0) log("flowing, level=" + best.level.toFixed(3));
+          }
+        }
+      }
+    } catch (e) {
+      return; // frame script torn down
+    }
+    schedule(frame, next);
+  }
+  schedule(frame, 500);
+}
+
+// =====================================================================
+// CHROME SIDE (the widget itself)
+// =====================================================================
+function scWidgetInit() {
+  if (document.getElementById("sc-widget-test")) return;
+  console.log("[SC-WIDGET] scWidgetInit() running");
+
+  // ---- Palette (Catppuccin Mocha) ----
   const COL_BG = "#1e1e2e";
   const COL_TEXT = "#cdd6f4";
   const COL_SELECTION = "#585b70";
   const COL_SURFACE = "rgba(205, 214, 244, 0.08)";
-  const COL_SURFACE_HOVER = "rgba(205, 214, 244, 0.16)";
-  const COL_BORDER = "rgba(205, 214, 244, 0.08)";
   const COL_TEXT_DIM = "rgba(205, 214, 244, 0.6)";
   const COL_TRACK = "rgba(205, 214, 244, 0.14)";
 
-  // Musi być zgodne z EQ_BAR_COUNT w FRAME_SCRIPT (poniżej)!
   const EQ_BAR_COUNT = 14;
+  const MINI_BAR_COUNT = 4;
+  const PREF_MIN = "sc-widget.minimized";
+  const SVG_NS = "http://www.w3.org/2000/svg";
 
+  function readMinPref() {
+    try { return Services.prefs.getBoolPref(PREF_MIN, false); } catch (e) { return false; }
+  }
+  function writeMinPref(v) {
+    try { Services.prefs.setBoolPref(PREF_MIN, v); } catch (e) {}
+  }
+
+  // ---- Root ----
+  // Normal flow + flex-shrink:0 = it takes real space in the sidebar,
+  // the tab list shrinks/scrolls above it instead of sliding underneath.
   const widgetDiv = document.createElement("div");
   widgetDiv.id = "sc-widget-test";
-  // Ukryty dopóki nie znajdziemy karty z SoundCloudem
   widgetDiv.style.cssText = `
-    position: absolute;
-    bottom: 50px;
-    left: 20px;
-    right: 20px;
+    position: relative;
     display: none;
     flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 7px;
+    align-items: stretch;
+    flex-shrink: 0;
+    min-width: 0;
+    margin: 6px 8px 8px;
     padding: 10px 12px;
     box-sizing: border-box;
     -moz-window-dragging: no-drag;
     font-family: system-ui, -apple-system, sans-serif;
-
-    /* --- Mica-friendly look ---
-       No painted gradient sheen and a color-neutral tint (no blue/
-       purple cast), so it blends with whatever Mica/accent color
-       the browser itself is using instead of standing out. */
     background: rgba(0, 0, 0, 0.25);
     backdrop-filter: blur(6px) saturate(120%);
-    -moz-backdrop-filter: blur(6px) saturate(120%);
     border: 1px solid rgba(255, 255, 255, 0.10);
     border-radius: 16px;
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.20);
-    z-index: 1;
     transition: opacity 0.12s ease;
   `;
 
   const styleTag = document.createElement("style");
   styleTag.textContent = `
-    #sc-widget-test *::selection {
-      background-color: ${COL_SELECTION};
-      color: ${COL_TEXT};
-    }
-    #sc-widget-test button {
-      transition: background-color 0.12s ease, transform 0.08s ease;
-    }
-    #sc-widget-test button:hover {
-      background-color: ${COL_SELECTION} !important;
-    }
-    #sc-widget-test button:active {
-      transform: scale(0.94);
-    }
-    #sc-widget-test .sc-eq-bar {
-      transition: opacity 0.15s ease;
-    }
+    #sc-widget-test *::selection { background-color: ${COL_SELECTION}; color: ${COL_TEXT}; }
+    #sc-widget-test button { transition: background-color 0.12s ease, transform 0.08s ease, opacity 0.15s ease; }
+    #sc-widget-test button:hover { background-color: ${COL_SELECTION} !important; }
+    #sc-widget-test button:active { transform: scale(0.94); }
+
+    #sc-widget-test.sc-narrow { display: none !important; }
+    #sc-widget-test.sc-min { padding: 6px 8px !important; border-radius: 12px !important; }
+    #sc-widget-test.sc-min #sc-full { display: none !important; }
+    #sc-widget-test:not(.sc-min) #sc-mini { display: none !important; }
+
+    #sc-widget-minbtn { opacity: 0.35; }
+    #sc-widget-test:hover #sc-widget-minbtn { opacity: 1; }
   `;
   widgetDiv.appendChild(styleTag);
 
-  const SVG_NS = "http://www.w3.org/2000/svg";
+  // ---- Small helpers ----
+  function circleBtn(id, size, bg) {
+    const b = document.createElement("button");
+    if (id) b.id = id;
+    b.style.cssText = `
+      width: ${size}px; height: ${size}px; min-width: ${size}px;
+      border-radius: 50%; border: none; background-color: ${bg};
+      cursor: pointer; -moz-window-dragging: no-drag;
+      display: flex; align-items: center; justify-content: center;
+      padding: 0; flex-shrink: 0; appearance: none;
+    `;
+    return b;
+  }
 
-  // ---- Okładka ----
-  const artworkWrapper = document.createElement("div");
-  artworkWrapper.style.cssText = `
-    position: relative;
-    width: 56px;
-    height: 56px;
-    border-radius: 8px;
-    overflow: hidden;
-    background-color: ${COL_SURFACE};
-    flex-shrink: 0;
-    transition: box-shadow 0.05s linear;
+  function buildChevron(up) {
+    const svg = document.createElementNS(SVG_NS, "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("width", "10");
+    svg.setAttribute("height", "10");
+    svg.setAttribute("fill", "none");
+    svg.setAttribute("stroke", COL_TEXT);
+    svg.setAttribute("stroke-width", "3");
+    svg.setAttribute("stroke-linecap", "round");
+    svg.setAttribute("stroke-linejoin", "round");
+    const p = document.createElementNS(SVG_NS, "path");
+    p.setAttribute("d", up ? "M6 15l6-6 6 6" : "M6 9l6 6 6-6");
+    svg.appendChild(p);
+    return svg;
+  }
+
+  function setPlayIcon(el, s) {
+    el.style.cssText = `
+      width: 0; height: 0;
+      border-top: ${8 * s}px solid transparent;
+      border-bottom: ${8 * s}px solid transparent;
+      border-left: ${13 * s}px solid ${COL_BG};
+      margin-left: ${3 * s}px;
+    `;
+  }
+
+  function setPauseIcon(el, s) {
+    const w = 13 * s, h = 14 * s, b = 4 * s;
+    el.style.cssText = `
+      width: ${w}px; height: ${h}px;
+      background:
+        linear-gradient(${COL_BG}, ${COL_BG}) 0 0 / ${b}px ${h}px no-repeat,
+        linear-gradient(${COL_BG}, ${COL_BG}) ${w - b}px 0 / ${b}px ${h}px no-repeat;
+    `;
+  }
+
+  // ---- Minimize button (full mode, top-right) ----
+  const minBtn = circleBtn("sc-widget-minbtn", 18, COL_SURFACE);
+  minBtn.title = "Minimize";
+  minBtn.style.position = "absolute";
+  minBtn.style.top = "6px";
+  minBtn.style.right = "6px";
+  minBtn.style.zIndex = "2";
+  minBtn.appendChild(buildChevron(false));
+  widgetDiv.appendChild(minBtn);
+
+  // =================== FULL VIEW ===================
+  const fullBody = document.createElement("div");
+  fullBody.id = "sc-full";
+  fullBody.style.cssText = `
+    display: flex; flex-direction: column; align-items: center;
+    justify-content: center; gap: 7px; width: 100%; min-width: 0;
   `;
 
+  // Artwork
+  const artworkWrapper = document.createElement("div");
+  artworkWrapper.style.cssText = `
+    position: relative; width: 56px; height: 56px; border-radius: 8px;
+    overflow: hidden; background-color: ${COL_SURFACE}; flex-shrink: 0;
+  `;
   const artworkEl = document.createElement("div");
   artworkEl.id = "sc-widget-artwork";
   artworkEl.style.cssText = `
-    width: 100%;
-    height: 100%;
-    background-size: cover;
-    background-position: center;
-    transition: filter 0.15s ease;
+    width: 100%; height: 100%; background-size: cover;
+    background-position: center; transition: filter 0.15s ease;
   `;
   artworkWrapper.appendChild(artworkEl);
 
-  // ---- Ikonka oka (blur okładki) ----
+  // Eye (blur artwork)
   function buildEyeSvg(closed) {
     const svg = document.createElementNS(SVG_NS, "svg");
     svg.setAttribute("viewBox", "0 0 24 24");
@@ -119,12 +567,10 @@ function scWidgetInit() {
     svg.setAttribute("stroke-width", "2.4");
     svg.setAttribute("stroke-linecap", "round");
     svg.setAttribute("stroke-linejoin", "round");
-
     if (!closed) {
       const path = document.createElementNS(SVG_NS, "path");
       path.setAttribute("d", "M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z");
       svg.appendChild(path);
-
       const circle = document.createElementNS(SVG_NS, "circle");
       circle.setAttribute("cx", "12");
       circle.setAttribute("cy", "12");
@@ -134,7 +580,6 @@ function scWidgetInit() {
       const path = document.createElementNS(SVG_NS, "path");
       path.setAttribute("d", "M17.94 17.94A10.94 10.94 0 0112 19c-7 0-11-7-11-7a21.6 21.6 0 015.06-5.94M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 7 11 7a21.6 21.6 0 01-2.16 3.19M14.12 14.12a3 3 0 11-4.24-4.24");
       svg.appendChild(path);
-
       const line = document.createElementNS(SVG_NS, "line");
       line.setAttribute("x1", "1");
       line.setAttribute("y1", "1");
@@ -142,86 +587,51 @@ function scWidgetInit() {
       line.setAttribute("y2", "23");
       svg.appendChild(line);
     }
-
     return svg;
   }
 
-  const eyeBtn = document.createElement("button");
-  eyeBtn.id = "sc-widget-eye";
-  eyeBtn.style.cssText = `
-    position: absolute;
-    top: 4px;
-    right: 4px;
-    width: 18px;
-    height: 18px;
-    border-radius: 50%;
-    border: none;
-    background-color: ${COL_TEXT};
-    cursor: pointer;
-    -moz-window-dragging: no-drag;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 0;
-  `;
-
+  const eyeBtn = circleBtn("sc-widget-eye", 18, COL_TEXT);
+  eyeBtn.style.position = "absolute";
+  eyeBtn.style.top = "4px";
+  eyeBtn.style.right = "4px";
   function setEyeIcon(closed) {
     eyeBtn.textContent = "";
     eyeBtn.appendChild(buildEyeSvg(closed));
   }
-
   setEyeIcon(false);
 
   let artworkHidden = false;
   eyeBtn.addEventListener("click", () => {
     artworkHidden = !artworkHidden;
-    if (artworkHidden) {
-      artworkEl.style.filter = "blur(16px)";
-      setEyeIcon(true);
-    } else {
-      artworkEl.style.filter = "none";
-      setEyeIcon(false);
-    }
+    const f = artworkHidden ? "blur(16px)" : "none";
+    artworkEl.style.filter = f;
+    miniArt.style.filter = artworkHidden ? "blur(8px)" : "none";
+    setEyeIcon(artworkHidden);
   });
-
   artworkWrapper.appendChild(eyeBtn);
 
-  // ---- Tytuł utworu ----
+  // Title
   const titleEl = document.createElement("div");
   titleEl.id = "sc-widget-title";
   titleEl.style.cssText = `
-    color: ${COL_TEXT};
-    font-size: 11px;
-    font-weight: 600;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    max-width: 100%;
-    text-align: center;
+    color: ${COL_TEXT}; font-size: 11px; font-weight: 600;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    max-width: 100%; text-align: center;
   `;
-  titleEl.textContent = "—";
+  titleEl.textContent = "â€”";
 
-  // ---- Equalizer (reaguje na dźwięk z karty SoundClouda) ----
+  // EQ
   const eqContainer = document.createElement("div");
   eqContainer.id = "sc-widget-eq";
   eqContainer.style.cssText = `
-    display: flex;
-    align-items: flex-end;
-    justify-content: center;
-    gap: 2px;
-    width: 100%;
-    height: 18px;
-    -moz-window-dragging: no-drag;
+    display: flex; align-items: flex-end; justify-content: center;
+    gap: 2px; width: 100%; height: 18px;
   `;
-
   const eqBarEls = [];
   for (let i = 0; i < EQ_BAR_COUNT; i++) {
     const bar = document.createElement("div");
-    bar.className = "sc-eq-bar";
     bar.style.cssText = `
-      width: 3px;
-      height: 3px;
-      border-radius: 2px;
+      width: 3px; height: 3px; border-radius: 2px;
       background: linear-gradient(180deg, ${COL_TEXT} 0%, rgba(205, 214, 244, 0.35) 100%);
       opacity: 0.5;
     `;
@@ -229,179 +639,73 @@ function scWidgetInit() {
     eqBarEls.push(bar);
   }
 
-  // ---- Przycisk mute ----
+  // Mute
   function buildSpeakerSvg(muted) {
     const svg = document.createElementNS(SVG_NS, "svg");
     svg.setAttribute("viewBox", "0 0 16 16");
     svg.setAttribute("width", "10");
     svg.setAttribute("height", "10");
     svg.setAttribute("fill", COL_BG);
-
-    const path1 = document.createElementNS(SVG_NS, "path");
-    path1.setAttribute("d", "M7.14645 1.85356C7.46143 1.53858 8 1.76167 8 2.20712V13.7929C8 14.2384 7.46143 14.4614 7.14645 14.1465L4 11H1.5C1.22386 11 1 10.7762 1 10.5V5.50001C1 5.22387 1.22386 5.00001 1.5 5.00001H4L7.14645 1.85356Z");
-    svg.appendChild(path1);
-
-    const path2 = document.createElementNS(SVG_NS, "path");
-    if (muted) {
-      path2.setAttribute("d", "M13.4697 10.5303L12 9.06066L10.5303 10.5303L9.46967 9.46967L10.9393 8L9.46967 6.53033L10.5303 5.46967L12 6.93934L13.4697 5.46967L14.5303 6.53033L13.0607 8L14.5303 9.46967L13.4697 10.5303Z");
-    } else {
-      path2.setAttribute("d", "M12 7.99999C12 9.48649 10.9189 10.7205 9.5 10.9585V5.04147C10.9189 5.27951 12 6.5135 12 7.99999Z");
-    }
-    svg.appendChild(path2);
-
+    const p1 = document.createElementNS(SVG_NS, "path");
+    p1.setAttribute("d", "M7.14645 1.85356C7.46143 1.53858 8 1.76167 8 2.20712V13.7929C8 14.2384 7.46143 14.4614 7.14645 14.1465L4 11H1.5C1.22386 11 1 10.7762 1 10.5V5.50001C1 5.22387 1.22386 5.00001 1.5 5.00001H4L7.14645 1.85356Z");
+    svg.appendChild(p1);
+    const p2 = document.createElementNS(SVG_NS, "path");
+    p2.setAttribute("d", muted
+      ? "M13.4697 10.5303L12 9.06066L10.5303 10.5303L9.46967 9.46967L10.9393 8L9.46967 6.53033L10.5303 5.46967L12 6.93934L13.4697 5.46967L14.5303 6.53033L13.0607 8L14.5303 9.46967L13.4697 10.5303Z"
+      : "M12 7.99999C12 9.48649 10.9189 10.7205 9.5 10.9585V5.04147C10.9189 5.27951 12 6.5135 12 7.99999Z");
+    svg.appendChild(p2);
     return svg;
   }
 
-  const muteBtn = document.createElement("button");
-  muteBtn.id = "sc-widget-mute";
-  muteBtn.style.cssText = `
-    width: 20px;
-    height: 20px;
-    border-radius: 50%;
-    border: none;
-    background-color: ${COL_TEXT};
-    cursor: pointer;
-    -moz-window-dragging: no-drag;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 0;
-    flex-shrink: 0;
-  `;
-
+  const muteBtn = circleBtn("sc-widget-mute", 20, COL_TEXT);
   function setMuteIcon(muted) {
     muteBtn.textContent = "";
     muteBtn.appendChild(buildSpeakerSvg(muted));
   }
-
   setMuteIcon(false);
 
-  muteBtn.addEventListener("click", () => {
-    sendToSoundCloudTab("SCWidget:ToggleMute", "SCWidget:ToggleMuteReply", (data) => {
-      updateFromInfo(data);
-    });
-  });
-
-  // ---- Pasek postępu ----
+  // Progress
   const progressOuter = document.createElement("div");
   progressOuter.id = "sc-widget-progress-outer";
   progressOuter.style.cssText = `
-    width: 100%;
-    height: 4px;
-    background: ${COL_TRACK};
-    border-radius: 2px;
-    cursor: pointer;
-    position: relative;
-    -moz-window-dragging: no-drag;
+    width: 100%; height: 4px; background: ${COL_TRACK};
+    border-radius: 2px; cursor: pointer; position: relative;
   `;
   const progressFill = document.createElement("div");
-  progressFill.id = "sc-widget-progress-fill";
-  progressFill.style.cssText = `
-    height: 100%;
-    width: 0%;
-    background: ${COL_TEXT};
-    border-radius: 2px;
-  `;
+  progressFill.style.cssText = `height: 100%; width: 0%; background: ${COL_TEXT}; border-radius: 2px;`;
   progressOuter.appendChild(progressFill);
 
-  // ---- Rząd: czas + mute ----
+  // Time + mute row
   const timeRow = document.createElement("div");
-  timeRow.style.cssText = `
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    width: 100%;
-  `;
-
+  timeRow.style.cssText = `display: flex; align-items: center; justify-content: space-between; width: 100%;`;
   const timeEl = document.createElement("div");
   timeEl.id = "sc-widget-time";
-  timeEl.style.cssText = `
-    color: ${COL_TEXT_DIM};
-    font-size: 10px;
-    font-variant-numeric: tabular-nums;
-  `;
+  timeEl.style.cssText = `color: ${COL_TEXT_DIM}; font-size: 10px; font-variant-numeric: tabular-nums;`;
   timeEl.textContent = "0:00 / 0:00";
-
   timeRow.appendChild(timeEl);
   timeRow.appendChild(muteBtn);
 
-  // ---- Rząd przycisków ----
+  // Controls
   const controlsRow = document.createElement("div");
-  controlsRow.style.cssText = `
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-  `;
+  controlsRow.style.cssText = `display: flex; align-items: center; justify-content: center; gap: 8px;`;
 
-  const prevBtn = document.createElement("button");
-  prevBtn.id = "sc-widget-prev";
-  prevBtn.style.cssText = `
-    width: 24px;
-    height: 24px;
-    border-radius: 50%;
-    border: none;
-    background-color: ${COL_SURFACE};
-    cursor: pointer;
-    -moz-window-dragging: no-drag;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 0;
-  `;
+  const prevBtn = circleBtn("sc-widget-prev", 24, COL_SURFACE);
   const prevIcon = document.createElement("span");
   prevIcon.style.cssText = `
-    width: 0;
-    height: 0;
-    border-top: 5px solid transparent;
-    border-bottom: 5px solid transparent;
-    border-right: 8px solid ${COL_TEXT};
-    margin-right: 2px;
+    width: 0; height: 0; border-top: 5px solid transparent;
+    border-bottom: 5px solid transparent; border-right: 8px solid ${COL_TEXT}; margin-right: 2px;
   `;
   prevBtn.appendChild(prevIcon);
 
-  const playPauseBtn = document.createElement("button");
-  playPauseBtn.id = "sc-widget-playpause";
-  playPauseBtn.style.cssText = `
-    width: 34px;
-    height: 34px;
-    border-radius: 50%;
-    border: none;
-    background-color: ${COL_TEXT};
-    cursor: pointer;
-    -moz-window-dragging: no-drag;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 0;
-  `;
+  const playPauseBtn = circleBtn("sc-widget-playpause", 34, COL_TEXT);
   const icon = document.createElement("span");
-  icon.id = "sc-widget-icon";
   playPauseBtn.appendChild(icon);
 
-  const nextBtn = document.createElement("button");
-  nextBtn.id = "sc-widget-next";
-  nextBtn.style.cssText = `
-    width: 24px;
-    height: 24px;
-    border-radius: 50%;
-    border: none;
-    background-color: ${COL_SURFACE};
-    cursor: pointer;
-    -moz-window-dragging: no-drag;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 0;
-  `;
+  const nextBtn = circleBtn("sc-widget-next", 24, COL_SURFACE);
   const nextIcon = document.createElement("span");
   nextIcon.style.cssText = `
-    width: 0;
-    height: 0;
-    border-top: 5px solid transparent;
-    border-bottom: 5px solid transparent;
-    border-left: 8px solid ${COL_TEXT};
-    margin-left: 2px;
+    width: 0; height: 0; border-top: 5px solid transparent;
+    border-bottom: 5px solid transparent; border-left: 8px solid ${COL_TEXT}; margin-left: 2px;
   `;
   nextBtn.appendChild(nextIcon);
 
@@ -409,36 +713,135 @@ function scWidgetInit() {
   controlsRow.appendChild(playPauseBtn);
   controlsRow.appendChild(nextBtn);
 
-  widgetDiv.appendChild(artworkWrapper);
-  widgetDiv.appendChild(titleEl);
-  widgetDiv.appendChild(eqContainer);
-  widgetDiv.appendChild(progressOuter);
-  widgetDiv.appendChild(timeRow);
-  widgetDiv.appendChild(controlsRow);
-  container.appendChild(widgetDiv);
-  console.log("[SC-WIDGET] Widget wstrzyknięty pomyślnie (ukryty do czasu znalezienia karty SC)!");
+  fullBody.appendChild(artworkWrapper);
+  fullBody.appendChild(titleEl);
+  fullBody.appendChild(eqContainer);
+  fullBody.appendChild(progressOuter);
+  fullBody.appendChild(timeRow);
+  fullBody.appendChild(controlsRow);
+  widgetDiv.appendChild(fullBody);
 
-  function setIconPlay() {
-    icon.style.cssText = `
-      width: 0;
-      height: 0;
-      border-top: 8px solid transparent;
-      border-bottom: 8px solid transparent;
-      border-left: 13px solid ${COL_BG};
-      margin-left: 3px;
-    `;
+  // =================== MINI VIEW ===================
+  const miniRow = document.createElement("div");
+  miniRow.id = "sc-mini";
+  miniRow.style.cssText = `display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0;`;
+
+  const miniArtWrap = document.createElement("div");
+  miniArtWrap.style.cssText = `
+    width: 28px; height: 28px; border-radius: 6px; overflow: hidden;
+    flex-shrink: 0; background-color: ${COL_SURFACE};
+  `;
+  const miniArt = document.createElement("div");
+  miniArt.style.cssText = `
+    width: 100%; height: 100%; background-size: cover;
+    background-position: center; transition: filter 0.15s ease;
+  `;
+  miniArtWrap.appendChild(miniArt);
+
+  const miniText = document.createElement("div");
+  miniText.style.cssText = `flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px;`;
+  const miniTitle = document.createElement("div");
+  miniTitle.style.cssText = `
+    color: ${COL_TEXT}; font-size: 11px; font-weight: 600;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  `;
+  miniTitle.textContent = "â€”";
+  const miniProgress = document.createElement("div");
+  miniProgress.style.cssText = `width: 100%; height: 3px; background: ${COL_TRACK}; border-radius: 2px; cursor: pointer;`;
+  const miniProgressFill = document.createElement("div");
+  miniProgressFill.style.cssText = `height: 100%; width: 0%; background: ${COL_TEXT}; border-radius: 2px;`;
+  miniProgress.appendChild(miniProgressFill);
+  miniText.appendChild(miniTitle);
+  miniText.appendChild(miniProgress);
+
+  const miniEq = document.createElement("div");
+  miniEq.style.cssText = `display: flex; align-items: flex-end; gap: 2px; height: 14px; flex-shrink: 0;`;
+  const miniBarEls = [];
+  for (let i = 0; i < MINI_BAR_COUNT; i++) {
+    const b = document.createElement("div");
+    b.style.cssText = `width: 2px; height: 2px; border-radius: 1px; background: ${COL_TEXT}; opacity: 0.6;`;
+    miniEq.appendChild(b);
+    miniBarEls.push(b);
   }
 
-  function setIconPause() {
-    icon.style.cssText = `
-      width: 13px;
-      height: 14px;
-      background:
-        linear-gradient(${COL_BG}, ${COL_BG}) 0 0 / 4px 14px no-repeat,
-        linear-gradient(${COL_BG}, ${COL_BG}) 9px 0 / 4px 14px no-repeat;
-    `;
+  const miniPlayBtn = circleBtn("sc-widget-mini-play", 24, COL_TEXT);
+  const miniIcon = document.createElement("span");
+  miniPlayBtn.appendChild(miniIcon);
+
+  const expandBtn = circleBtn("sc-widget-expand", 18, COL_SURFACE);
+  expandBtn.title = "Expand";
+  expandBtn.appendChild(buildChevron(true));
+
+  miniRow.appendChild(miniArtWrap);
+  miniRow.appendChild(miniText);
+  miniRow.appendChild(miniEq);
+  miniRow.appendChild(miniPlayBtn);
+  miniRow.appendChild(expandBtn);
+  widgetDiv.appendChild(miniRow);
+
+  setPlayIcon(icon, 1);
+  setPlayIcon(miniIcon, 0.6);
+
+  function setMinimized(v, persist) {
+    widgetDiv.classList.toggle("sc-min", v);
+    if (persist) writeMinPref(v);
+  }
+  setMinimized(readMinPref(), false);
+  minBtn.addEventListener("click", () => setMinimized(true, true));
+  expandBtn.addEventListener("click", () => setMinimized(false, true));
+
+  // =================== MOUNTING ===================
+  // Put the widget right above Zen's sidebar footer (workspace switcher
+  // etc.). Fallback: right after the tab strip.
+  let resizeObs = null;
+
+  function findMount() {
+    for (const id of ["zen-sidebar-foot-buttons", "zen-sidebar-bottom-buttons"]) {
+      const el = document.getElementById(id);
+      if (el && el.parentNode) {
+        let parent = el.parentNode;
+        let before = el;
+        try {
+          const cs = getComputedStyle(parent);
+          if (cs.display.includes("flex") && cs.flexDirection.startsWith("row") && parent.parentNode) {
+            before = parent;
+            parent = parent.parentNode;
+          }
+        } catch (e) {}
+        return { parent, before };
+      }
+    }
+    const tabs = document.getElementById("tabbrowser-tabs");
+    if (tabs && tabs.parentNode) return { parent: tabs.parentNode, before: tabs.nextSibling };
+    return null;
   }
 
+  function mountWidget() {
+    const m = findMount();
+    if (!m) return false;
+    if (widgetDiv.parentNode !== m.parent || widgetDiv.nextSibling !== m.before) {
+      m.parent.insertBefore(widgetDiv, m.before);
+      console.log("[SC-WIDGET] mounted into", m.parent.id || m.parent.tagName);
+    }
+    // Hide when the sidebar is collapsed to icons-only
+    try {
+      if (resizeObs) resizeObs.disconnect();
+      resizeObs = new ResizeObserver(() => {
+        widgetDiv.classList.toggle("sc-narrow", m.parent.clientWidth < 150);
+      });
+      resizeObs.observe(m.parent);
+    } catch (e) {}
+    return true;
+  }
+
+  if (!mountWidget()) {
+    let tries = 0;
+    const iv = setInterval(() => {
+      if (mountWidget() || ++tries > 30) clearInterval(iv);
+    }, 500);
+  }
+
+  // =================== STATE / UPDATES ===================
   function formatTime(totalSeconds) {
     const s = Math.max(0, Math.floor(totalSeconds || 0));
     const m = Math.floor(s / 60);
@@ -446,20 +849,12 @@ function scWidgetInit() {
     return m + ":" + (sec < 10 ? "0" : "") + sec;
   }
 
-  // Usuwa domyślny prefiks SoundClouda typu "Current track: ", "Now playing: " itp.
-  // Usuwa też sklejony duplikat tytułu - SoundCloud w tytule utworu
-  // czasem ma dwa zagnieżdżone elementy z tym samym tekstem (ukryty +
-  // widoczny, pod ellipsis/SEO), przez co textContent daje "TytułTytuł".
   function cleanTrackTitle(raw) {
     if (!raw) return raw;
     let title = raw.replace(/^(current track|now playing)\s*:\s*/i, "").trim();
     const half = title.length / 2;
-    if (Number.isInteger(half) && half > 0) {
-      const firstHalf = title.slice(0, half);
-      const secondHalf = title.slice(half);
-      if (firstHalf === secondHalf) {
-        title = firstHalf;
-      }
+    if (Number.isInteger(half) && half > 0 && title.slice(0, half) === title.slice(half)) {
+      title = title.slice(0, half);
     }
     return title;
   }
@@ -489,24 +884,29 @@ function scWidgetInit() {
       isPlaying = false;
       return;
     }
-
     showWidget();
 
     if (data.playTitle === "Pause current") {
-      setIconPause();
+      setPauseIcon(icon, 1);
+      setPauseIcon(miniIcon, 0.6);
       isPlaying = true;
     } else if (data.playTitle === "Play current") {
-      setIconPlay();
+      setPlayIcon(icon, 1);
+      setPlayIcon(miniIcon, 0.6);
       isPlaying = false;
     }
 
     if (data.artworkUrl && data.artworkUrl !== lastArtworkUrl) {
       lastArtworkUrl = data.artworkUrl;
       artworkEl.style.backgroundImage = `url("${data.artworkUrl}")`;
+      miniArt.style.backgroundImage = `url("${data.artworkUrl}")`;
     }
 
     if (data.trackTitle) {
-      titleEl.textContent = cleanTrackTitle(data.trackTitle);
+      const t = cleanTrackTitle(data.trackTitle);
+      titleEl.textContent = t;
+      miniTitle.textContent = t;
+      miniRow.title = t;
     }
 
     if (typeof data.muted === "boolean") {
@@ -517,26 +917,18 @@ function scWidgetInit() {
     const current = data.currentTime || 0;
     const duration = data.duration || 0;
     timeEl.textContent = formatTime(current) + " / " + formatTime(duration);
-
     const percent = duration > 0 ? (current / duration) * 100 : 0;
     progressFill.style.width = percent + "%";
+    miniProgressFill.style.width = percent + "%";
   }
 
-  // ==================================================
-  // Equalizer: wygładzone renderowanie 60fps
-  // Dane wejściowe (targetBars/targetGlow) przychodzą z karty SC
-  // przez SCWidget:AudioData (patrz FRAME_SCRIPT + globalny listener niżej).
-  // Jeśli dane nie napływają (np. tap się nie udał / strona jeszcze
-  // nie połączyła żadnego node'a z destination), a utwór gra - włącza
-  // się subtelna, syntetyczna animacja "oddechu", żeby widget nigdy
-  // nie wyglądał na martwy.
-  // ==================================================
-
+  // =================== EQ RENDERING ===================
   let targetBars = new Array(EQ_BAR_COUNT).fill(0);
   let displayBars = new Array(EQ_BAR_COUNT).fill(0);
   let targetGlow = 0;
   let displayGlow = 0;
   let lastAudioMsgTime = 0;
+  let lastLoudTime = 0;
 
   function idleBarValue(i, now) {
     return 0.12 + 0.10 * Math.sin(now / 320 + i * 0.75) + 0.05 * Math.sin(now / 130 + i * 1.9);
@@ -545,286 +937,51 @@ function scWidgetInit() {
   function animateEq() {
     if (widgetVisible) {
       const now = Date.now();
-      const hasRecentData = now - lastAudioMsgTime < 400;
+      // Real data = messages are arriving AND there was actual signal recently.
+      const useReal = (now - lastAudioMsgTime < 400) && (now - lastLoudTime < 1500);
 
       for (let i = 0; i < EQ_BAR_COUNT; i++) {
         let t;
-        if (hasRecentData) {
-          t = targetBars[i] || 0;
-        } else if (isPlaying) {
-          t = Math.max(0, idleBarValue(i, now));
-        } else {
-          t = 0;
-        }
-        displayBars[i] += (t - displayBars[i]) * 0.25;
+        if (useReal) t = targetBars[i] || 0;
+        else if (isPlaying) t = Math.max(0, idleBarValue(i, now));
+        else t = 0;
+        // fast attack, slower release = punchier bars
+        const k = t > displayBars[i] ? 0.55 : 0.2;
+        displayBars[i] += (t - displayBars[i]) * k;
+      }
 
-        const px = 3 + displayBars[i] * 15;
-        eqBarEls[i].style.height = px.toFixed(1) + "px";
-        eqBarEls[i].style.opacity = isMuted ? "0.3" : (0.45 + displayBars[i] * 0.55).toFixed(2);
+      if (!widgetDiv.classList.contains("sc-min")) {
+        for (let i = 0; i < EQ_BAR_COUNT; i++) {
+          eqBarEls[i].style.height = (3 + displayBars[i] * 15).toFixed(1) + "px";
+          eqBarEls[i].style.opacity = isMuted ? "0.3" : (0.45 + displayBars[i] * 0.55).toFixed(2);
+        }
+      } else {
+        const per = EQ_BAR_COUNT / MINI_BAR_COUNT;
+        for (let i = 0; i < MINI_BAR_COUNT; i++) {
+          let s = 0, n = 0;
+          for (let j = Math.floor(i * per); j < Math.floor((i + 1) * per); j++) { s += displayBars[j]; n++; }
+          const v = n ? s / n : 0;
+          miniBarEls[i].style.height = (2 + v * 12).toFixed(1) + "px";
+          miniBarEls[i].style.opacity = isMuted ? "0.3" : (0.45 + v * 0.55).toFixed(2);
+        }
       }
 
       let glowTarget;
-      if (hasRecentData) {
-        glowTarget = targetGlow;
-      } else if (isPlaying) {
-        glowTarget = 0.12 + 0.05 * Math.sin(now / 500);
-      } else {
-        glowTarget = 0;
-      }
+      if (useReal) glowTarget = targetGlow;
+      else if (isPlaying) glowTarget = 0.12 + 0.05 * Math.sin(now / 500);
+      else glowTarget = 0;
       displayGlow += (glowTarget - displayGlow) * 0.15;
 
-      artworkWrapper.style.boxShadow =
-        "0 0 " + (8 + displayGlow * 26).toFixed(1) + "px rgba(205, 214, 244, " + (0.12 + displayGlow * 0.4).toFixed(2) + ")";
+      const shadow = "0 0 " + (8 + displayGlow * 26).toFixed(1) + "px rgba(205, 214, 244, " +
+        (0.12 + displayGlow * 0.4).toFixed(2) + ")";
+      artworkWrapper.style.boxShadow = shadow;
+      miniArtWrap.style.boxShadow = shadow;
     }
-
     requestAnimationFrame(animateEq);
   }
   requestAnimationFrame(animateEq);
 
-  // ==================================================
-  // Frame script wstrzykiwany do procesu treści KAŻDEJ karty
-  // (globalnie, patrz window.messageManager.loadFrameScript(url, true)
-  // na końcu pliku). Musi być globalny i załadowany WCZEŚNIE, bo
-  // audio-tap poniżej działa tylko jeśli zdąży załatać
-  // AudioNode.prototype.connect zanim skrypt SoundClouda zbuduje
-  // swój graf audio (SoundCloud gra przez Web Audio API bezpośrednio -
-  // buforami przez AudioBufferSourceNode/AudioWorkletNode, NIE przez
-  // <audio>, więc nie ma czego łapać przez createMediaElementSource).
-  // ==================================================
-
-  const FRAME_SCRIPT = `
-    (function () {
-      function dispatchClick(selector) {
-        const btn = content.document.querySelector(selector);
-        if (btn) {
-          const ev = new content.MouseEvent("click", {
-            bubbles: true,
-            cancelable: true,
-            view: content
-          });
-          btn.dispatchEvent(ev);
-        }
-        return !!btn;
-      }
-
-      function extractArtworkUrl(el) {
-        if (!el) return null;
-        const bg = el.style.backgroundImage;
-        const match = /url\\(["']?(.*?)["']?\\)/.exec(bg || "");
-        return match ? match[1] : null;
-      }
-
-      function getInfo() {
-        const playBtn = content.document.querySelector(".playControls__play");
-        const titleBadge = content.document.querySelector(".playbackSoundBadge__title");
-        const progressWrapper = content.document.querySelector(".playbackTimeline__progressWrapper");
-        const artworkEl = content.document.querySelector('.playbackSoundBadge .sc-artwork[style*="background-image"]');
-        const volumeBtn = content.document.querySelector(".volume__button");
-
-        let rawTitle = null;
-        if (titleBadge) {
-          const innerLink = titleBadge.querySelector("a, span");
-          rawTitle = innerLink ? innerLink.textContent.trim() : titleBadge.textContent.trim();
-        }
-
-        return {
-          found: !!playBtn,
-          playTitle: playBtn ? playBtn.title : null,
-          trackTitle: rawTitle,
-          artworkUrl: extractArtworkUrl(artworkEl),
-          currentTime: progressWrapper ? parseFloat(progressWrapper.getAttribute("aria-valuenow")) : 0,
-          duration: progressWrapper ? parseFloat(progressWrapper.getAttribute("aria-valuemax")) : 0,
-          muted: volumeBtn ? volumeBtn.innerHTML.includes("13.4697 10.5303") : false
-        };
-      }
-
-      addMessageListener("SCWidget:GetInfo", function (msg) {
-        sendAsyncMessage("SCWidget:GetInfoReply", getInfo());
-      });
-
-      addMessageListener("SCWidget:TogglePlay", function (msg) {
-        dispatchClick(".playControls__play");
-        sendAsyncMessage("SCWidget:TogglePlayReply", getInfo());
-      });
-
-      addMessageListener("SCWidget:Next", function (msg) {
-        const clicked = dispatchClick(".playControls__next");
-        sendAsyncMessage("SCWidget:NextReply", { clicked: clicked });
-      });
-
-      addMessageListener("SCWidget:Prev", function (msg) {
-        const clicked = dispatchClick(".playControls__prev");
-        sendAsyncMessage("SCWidget:PrevReply", { clicked: clicked });
-      });
-
-      addMessageListener("SCWidget:ToggleMute", function (msg) {
-        dispatchClick(".volume__button");
-        sendAsyncMessage("SCWidget:ToggleMuteReply", getInfo());
-      });
-
-      addMessageListener("SCWidget:Seek", function (msg) {
-        const wrapper = content.document.querySelector(".playbackTimeline__progressWrapper");
-        if (wrapper) {
-          const rect = wrapper.getBoundingClientRect();
-          const targetX = rect.left + rect.width * msg.data.percent;
-          const targetY = rect.top + rect.height / 2;
-          const baseOpts = {
-            bubbles: true,
-            cancelable: true,
-            view: content,
-            clientX: targetX,
-            clientY: targetY
-          };
-
-          const downOpts = Object.assign({}, baseOpts, {
-            pointerId: 1,
-            pointerType: "mouse",
-            isPrimary: true,
-            button: 0,
-            buttons: 1
-          });
-          const upOpts = Object.assign({}, baseOpts, {
-            pointerId: 1,
-            pointerType: "mouse",
-            isPrimary: true,
-            button: 0,
-            buttons: 0
-          });
-
-          wrapper.dispatchEvent(new content.PointerEvent("pointerdown", downOpts));
-          wrapper.dispatchEvent(new content.MouseEvent("mousedown", baseOpts));
-          wrapper.dispatchEvent(new content.PointerEvent("pointermove", upOpts));
-          wrapper.dispatchEvent(new content.MouseEvent("mousemove", baseOpts));
-          wrapper.dispatchEvent(new content.PointerEvent("pointerup", upOpts));
-          wrapper.dispatchEvent(new content.MouseEvent("mouseup", baseOpts));
-          wrapper.dispatchEvent(new content.MouseEvent("click", baseOpts));
-        }
-        sendAsyncMessage("SCWidget:SeekReply", getInfo());
-      });
-
-      // ---- Audio-reactive equalizer: real tap via AudioNode.connect ----
-      //
-      // SoundCloud plays audio purely through the Web Audio API (buffers
-      // via AudioBufferSourceNode / AudioWorkletNode), there is no
-      // <audio> element to hook. Instead we patch AudioNode.prototype.connect
-      // in the CONTENT window, BEFORE SoundCloud's own bundle runs, so
-      // that whenever any node connects straight to the AudioContext's
-      // destination, we transparently also tap it into an AnalyserNode.
-      // This must be installed on DOMWindowCreated (fires before page
-      // scripts execute) - patching it later (e.g. on first message from
-      // chrome) is too late, since the graph is already wired by then.
-      //
-      // Must be kept in sync with EQ_BAR_COUNT in the chrome-side script!
-      var EQ_BAR_COUNT = 14;
-      var activeAnalyser = null;
-      var activeFreqData = null;
-
-      function installAudioTap(win) {
-        try {
-          var unwrapped = win.wrappedJSObject;
-          var AudioNodeCtor = unwrapped.AudioNode;
-          var DestinationCtor = unwrapped.AudioDestinationNode;
-          if (!AudioNodeCtor || !DestinationCtor) return;
-          if (AudioNodeCtor.prototype.__scWidgetTapped) return;
-
-          var originalConnect = AudioNodeCtor.prototype.connect;
-
-          function patchedConnect() {
-            try {
-              var dest = arguments[0];
-              if (dest instanceof DestinationCtor) {
-                var ctx = this.context;
-                var analyser = ctx.__scWidgetAnalyser;
-                if (!analyser) {
-                  analyser = ctx.createAnalyser();
-                  analyser.fftSize = 64;
-                  analyser.smoothingTimeConstant = 0.6;
-                  ctx.__scWidgetAnalyser = analyser;
-                  activeAnalyser = analyser;
-                  activeFreqData = new Uint8Array(analyser.frequencyBinCount);
-                  console.log("[SC-WIDGET][audio] Zlapano polaczenie z destination - tap aktywny.");
-                }
-                // Dopiete rownolegle, nie zmienia realnej sciezki dzwieku.
-                originalConnect.call(this, analyser);
-              }
-            } catch (e) {
-              console.log("[SC-WIDGET][audio] Blad w patched connect: " + (e && e.message));
-            }
-            return originalConnect.apply(this, arguments);
-          }
-
-          Object.defineProperty(AudioNodeCtor.prototype, "connect", {
-            value: exportFunction(patchedConnect, unwrapped),
-            writable: true,
-            configurable: true
-          });
-          AudioNodeCtor.prototype.__scWidgetTapped = true;
-          console.log("[SC-WIDGET][audio] AudioNode.connect zapatchowany przed skryptami strony.");
-        } catch (e) {
-          console.log("[SC-WIDGET][audio] installAudioTap nieudany: " + (e && e.message));
-        }
-      }
-
-      addEventListener("DOMWindowCreated", function (event) {
-        try {
-          var doc = event.target;
-          var win = doc && doc.defaultView;
-          if (!win || !win.location || !win.location.host) return;
-          if (win.location.host.indexOf("soundcloud.com") === -1) return;
-          // Nowy dokument = nowy AudioContext w przyszlosci -> zresetuj tap.
-          activeAnalyser = null;
-          activeFreqData = null;
-          installAudioTap(win);
-        } catch (e) {
-          console.log("[SC-WIDGET][audio] DOMWindowCreated handler blad: " + (e && e.message));
-        }
-      }, true);
-
-      function sendAudioFrame() {
-        if (!activeAnalyser) return;
-        activeAnalyser.getByteFrequencyData(activeFreqData);
-        var bars = new Array(EQ_BAR_COUNT);
-        var bins = activeFreqData.length;
-        var sum = 0;
-        for (var i = 0; i < EQ_BAR_COUNT; i++) {
-          var start = Math.floor((i * bins) / EQ_BAR_COUNT);
-          var end = Math.max(start + 1, Math.floor(((i + 1) * bins) / EQ_BAR_COUNT));
-          var bucketSum = 0;
-          for (var j = start; j < end; j++) bucketSum += activeFreqData[j];
-          var avg = bucketSum / (end - start) / 255;
-          bars[i] = Math.pow(avg, 0.6);
-          sum += avg;
-        }
-        var level = sum / EQ_BAR_COUNT;
-        sendAsyncMessage("SCWidget:AudioData", { bars: bars, level: level });
-
-        eqDebugTick++;
-        if (eqDebugTick % 40 === 0) {
-          console.log(
-            "[SC-WIDGET][audio] plynie: level=" + level.toFixed(3) +
-            (level < 0.01 ? "  <-- prawie 0: sprawdz czy dzwiek faktycznie gra" : "")
-          );
-        }
-      }
-
-      var eqDebugTick = 0;
-      content.setInterval(function () {
-        sendAudioFrame();
-      }, 50);
-
-      // Jesli skrypt zaladowal sie DO KARTY, ktora jest juz na soundcloud.com
-      // (np. wczytanie global-scriptu po starcie przegladarki dla juz
-      // otwartej karty), zainstaluj tap od razu - i tak i tak zlapiemy tylko
-      // przyszle connect() (np. po zmianie utworu), ale to lepsze niz nic.
-      try {
-        if (content && content.location && content.location.host &&
-            content.location.host.indexOf("soundcloud.com") !== -1) {
-          installAudioTap(content);
-        }
-      } catch (e) {}
-    })();
-  `;
-
+  // =================== TAB MESSAGING ===================
   function findSoundCloudTab() {
     for (const tab of gBrowser.tabs) {
       if (tab.hasAttribute("pending")) continue;
@@ -836,25 +993,20 @@ function scWidgetInit() {
     return null;
   }
 
-  // ---- Globalne wczytanie frame scriptu ----
-  // WAŻNE: musi być załadowany globalnie (drugi argument `true`) i od razu
-  // przy starcie, a nie leniwie przy pierwszej wysyłce wiadomości - inaczej
-  // DOMWindowCreated w frame scripcie zdąży ominąć pierwsze wejście na
-  // soundcloud.com (strona zdąży zbudować swój graf audio, zanim w ogóle
-  // wstrzykniemy patch). Dzięki `true` skrypt trafia do KAŻDEJ obecnej i
-  // przyszłej karty od razu.
-  const FRAME_SCRIPT_URL = "data:application/javascript," + encodeURIComponent(FRAME_SCRIPT);
-  window.messageManager.loadFrameScript(FRAME_SCRIPT_URL, true);
+  // Load the frame script globally & early, so the hooks are in place
+  // before SoundCloud's own scripts run on fresh page loads.
+  const FRAME_SCRIPT = "(" + scFrameScript.toString() + ")(" + EQ_BAR_COUNT + ");";
+  window.messageManager.loadFrameScript(
+    "data:application/javascript;charset=utf-8," + encodeURIComponent(FRAME_SCRIPT), true);
 
-  // Stały, globalny nasłuch danych equalizera - filtrujemy po tym, czy
-  // nadawca to aktualnie znaleziona karta SC (na wypadek kilku otwartych
-  // kart SoundClouda naraz).
   window.messageManager.addMessageListener("SCWidget:AudioData", (msg) => {
     const currentTab = findSoundCloudTab();
     if (!currentTab || currentTab.linkedBrowser !== msg.target) return;
-    lastAudioMsgTime = Date.now();
+    const now = Date.now();
+    lastAudioMsgTime = now;
     targetBars = msg.data.bars || new Array(EQ_BAR_COUNT).fill(0);
-    targetGlow = typeof msg.data.level === "number" ? msg.data.level : 0;
+    targetGlow = typeof msg.data.level === "number" ? Math.min(1, msg.data.level * 1.6) : 0;
+    if (targetGlow > 0.004) lastLoudTime = now;
   });
 
   function sendToSoundCloudTab(messageName, replyName, onReply, payload) {
@@ -863,87 +1015,64 @@ function scWidgetInit() {
       hideWidget();
       return;
     }
-
-    const browser = tab.linkedBrowser;
-    const mm = browser.messageManager;
-
+    const mm = tab.linkedBrowser.messageManager;
     mm.addMessageListener(replyName, function onReplyWrapper(msg) {
       mm.removeMessageListener(replyName, onReplyWrapper);
       onReply(msg.data);
     });
-
     mm.sendAsyncMessage(messageName, payload);
   }
 
   function pollInfo() {
+    if (!widgetDiv.isConnected) mountWidget();
     if (!findSoundCloudTab()) {
       hideWidget();
       return;
     }
-    sendToSoundCloudTab("SCWidget:GetInfo", "SCWidget:GetInfoReply", (data) => {
-      updateFromInfo(data);
-    });
+    sendToSoundCloudTab("SCWidget:GetInfo", "SCWidget:GetInfoReply", updateFromInfo);
   }
 
-  function tryInitialPing() {
-    if (findSoundCloudTab()) {
-      pollInfo();
-    } else {
-      console.log("[SC-WIDGET] Karta SC jeszcze niedostępna, czekam na SSTabRestored / poll...");
-    }
-  }
+  pollInfo();
 
-  tryInitialPing();
-
-  gBrowser.tabContainer.addEventListener("SSTabRestored", function onTabRestored(event) {
-    const tab = event.target;
+  gBrowser.tabContainer.addEventListener("SSTabRestored", (event) => {
     try {
-      const host = tab.linkedBrowser.currentURI.host;
-      if (host && host.includes("soundcloud.com")) {
-        console.log("[SC-WIDGET] Karta SC przywrócona, sprawdzam stan.");
-        pollInfo();
-      }
+      const host = event.target.linkedBrowser.currentURI.host;
+      if (host && host.includes("soundcloud.com")) pollInfo();
     } catch (e) {}
   });
-
-  // Reaguj też na otwarcie/zamknięcie/przejście na kartę SC, nie tylko na przywracanie sesji
-  gBrowser.tabContainer.addEventListener("TabClose", () => {
-    setTimeout(pollInfo, 100);
-  });
-
+  gBrowser.tabContainer.addEventListener("TabClose", () => setTimeout(pollInfo, 100));
   setInterval(pollInfo, 1000);
 
-  playPauseBtn.addEventListener("click", () => {
-    sendToSoundCloudTab("SCWidget:TogglePlay", "SCWidget:TogglePlayReply", (data) => {
-      updateFromInfo(data);
-    });
+  // =================== CONTROLS ===================
+  function togglePlay() {
+    sendToSoundCloudTab("SCWidget:TogglePlay", "SCWidget:TogglePlayReply", updateFromInfo);
+  }
+  playPauseBtn.addEventListener("click", togglePlay);
+  miniPlayBtn.addEventListener("click", togglePlay);
+
+  muteBtn.addEventListener("click", () => {
+    sendToSoundCloudTab("SCWidget:ToggleMute", "SCWidget:ToggleMuteReply", updateFromInfo);
   });
 
   nextBtn.addEventListener("click", () => {
-    sendToSoundCloudTab("SCWidget:Next", "SCWidget:NextReply", () => {
-      setTimeout(pollInfo, 300);
-    });
+    sendToSoundCloudTab("SCWidget:Next", "SCWidget:NextReply", () => setTimeout(pollInfo, 300));
   });
 
   prevBtn.addEventListener("click", () => {
-    sendToSoundCloudTab("SCWidget:Prev", "SCWidget:PrevReply", () => {
-      setTimeout(pollInfo, 300);
-    });
+    sendToSoundCloudTab("SCWidget:Prev", "SCWidget:PrevReply", () => setTimeout(pollInfo, 300));
   });
 
-  progressOuter.addEventListener("click", (e) => {
-    const rect = progressOuter.getBoundingClientRect();
-    const percent = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
-    sendToSoundCloudTab("SCWidget:Seek", "SCWidget:SeekReply", (data) => {
-      updateFromInfo(data);
-    }, { percent: percent });
-  });
+  function seekFrom(el) {
+    return (e) => {
+      const rect = el.getBoundingClientRect();
+      const percent = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+      sendToSoundCloudTab("SCWidget:Seek", "SCWidget:SeekReply", updateFromInfo, { percent });
+    };
+  }
+  progressOuter.addEventListener("click", seekFrom(progressOuter));
+  miniProgress.addEventListener("click", seekFrom(miniProgress));
 
-  // ---- Nie zasłaniaj listy podpowiedzi paska adresu ----
-  // Pasek adresu (urlbar) renderuje swoją listę wyników jako panel
-  // wewnątrz tego samego okna, więc nasz widget (position: absolute)
-  // potrafi się na nim rysować. Chowamy widget na czas otwarcia listy
-  // i pokazujemy z powrotem po jej zamknięciu.
+  // Don't draw over the urlbar results panel
   try {
     const urlbarPanel = window.gURLBar && window.gURLBar.view && window.gURLBar.view.panel;
     if (urlbarPanel) {
@@ -955,27 +1084,18 @@ function scWidgetInit() {
         widgetDiv.style.opacity = "1";
         widgetDiv.style.pointerEvents = "";
       });
-      console.log("[SC-WIDGET] Podpięto pod eventy panelu urlbar (popupshowing/popuphidden).");
-    } else {
-      console.log("[SC-WIDGET] gURLBar.view.panel niedostępny - pomijam obsługę zasłaniania listy.");
     }
-  } catch (e) {
-    console.log("[SC-WIDGET] Blad przy podpinaniu eventow urlbar: " + (e && e.message));
-  }
+  } catch (e) {}
 }
 
-// ---- Trigger scWidgetInit, logging exactly which path we took ----
+// ---- Boot ----
 try {
   if (typeof UC_API !== "undefined" && UC_API && UC_API.Runtime && UC_API.Runtime.startupFinished) {
-    console.log("[SC-WIDGET] UC_API found, using UC_API.Runtime.startupFinished()");
     UC_API.Runtime.startupFinished().then(scWidgetInit);
+  } else if (document.readyState === "complete") {
+    scWidgetInit();
   } else {
-    console.log("[SC-WIDGET] UC_API NOT available in this context - falling back");
-    if (document.readyState === "complete") {
-      scWidgetInit();
-    } else {
-      window.addEventListener("load", scWidgetInit, { once: true });
-    }
+    window.addEventListener("load", scWidgetInit, { once: true });
   }
 } catch (e) {
   console.log("[SC-WIDGET] top-level error while triggering init: " + (e && e.message));
