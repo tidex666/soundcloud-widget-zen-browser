@@ -7,6 +7,19 @@
 // NOTE: keep this file pure ASCII. The loader reads it as Latin-1, so any
 // raw UTF-8 symbol shows up as garbage. Use \uXXXX escapes in strings.
 //
+// v2.1.0
+//  - Favourites now come before Recent in the library panel (was the
+//    other way round).
+//  - Fixed: clicking a favourite/history row did nothing if you didn't
+//    already have a SoundCloud tab open; it now opens one.
+//  - Playback controls wrap instead of overflowing the widget when the
+//    sidebar is narrow.
+//  - Palette swapped from the purple/lavender scheme to a neutral
+//    glass/mica-friendly one, with a stronger frosted blur.
+//  - Switching between player/library/settings now animates the height
+//    change instead of snapping.
+//  - Fixed: "Like on SoundCloud when starring" only ever added the like,
+//    never removed it when you un-starred a track.
 // v2.0.0
 //  - Recently played history + favourites (star button / list button).
 //    Click to play, middle-click opens in a new tab. Saved to
@@ -554,22 +567,24 @@ function scFrameScript(EQ_BAR_COUNT) {
 // =====================================================================
 // CHROME SIDE (the widget itself)
 // =====================================================================
-const SC_WIDGET_VERSION = "2.0.0";
+const SC_WIDGET_VERSION = "2.1.0";
 
 function scWidgetInit() {
   if (document.getElementById("sc-widget-test")) return;
   console.log("[SC-WIDGET] init v" + SC_WIDGET_VERSION);
 
   // ---- Palette (Catppuccin Mocha) ----
-  const COL_BG = "#1e1e2e";
-  const COL_TEXT = "#cdd6f4";
-  const COL_SELECTION = "#585b70";
-  const COL_SURFACE = "rgba(205, 214, 244, 0.08)";
-  const COL_SURFACE_SOFT = "rgba(205, 214, 244, 0.045)";
-  const COL_BORDER = "rgba(205, 214, 244, 0.07)";
-  const COL_TEXT_DIM = "rgba(205, 214, 244, 0.6)";
-  const COL_TEXT_FAINT = "rgba(205, 214, 244, 0.38)";
-  const COL_TRACK = "rgba(205, 214, 244, 0.14)";
+  // Neutral glass/mica palette (no purple/blue tint) so the widget blends
+  // into any mica/acrylic sidebar theme instead of fighting it.
+  const COL_BG = "#18181b";
+  const COL_TEXT = "#f4f4f5";
+  const COL_SELECTION = "rgba(255, 255, 255, 0.16)";
+  const COL_SURFACE = "rgba(255, 255, 255, 0.08)";
+  const COL_SURFACE_SOFT = "rgba(255, 255, 255, 0.045)";
+  const COL_BORDER = "rgba(255, 255, 255, 0.10)";
+  const COL_TEXT_DIM = "rgba(255, 255, 255, 0.62)";
+  const COL_TEXT_FAINT = "rgba(255, 255, 255, 0.38)";
+  const COL_TRACK = "rgba(255, 255, 255, 0.16)";
 
   const EQ_BAR_COUNT = 14;
   const MINI_BAR_COUNT = 4;
@@ -761,8 +776,8 @@ function scWidgetInit() {
     padding: 10px 12px;
     box-sizing: border-box;
     -moz-window-dragging: no-drag;
-    background: rgba(0, 0, 0, 0.25);
-    backdrop-filter: blur(6px) saturate(120%);
+    background: rgba(24, 24, 27, 0.38);
+    backdrop-filter: blur(22px) saturate(140%);
     border: 1px solid rgba(255, 255, 255, 0.10);
     border-radius: 16px;
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.20);
@@ -848,7 +863,7 @@ function scWidgetInit() {
       display: flex; flex-direction: column; gap: 2px;
       max-height: 222px; overflow-y: auto; overflow-x: hidden;
       margin: 0 -6px; padding: 0 6px;
-      scrollbar-width: thin; scrollbar-color: rgba(205, 214, 244, 0.2) transparent;
+      scrollbar-width: thin; scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
     }
     #sc-widget-test .sc-row {
       display: flex; align-items: center; gap: 8px; min-width: 0;
@@ -870,7 +885,7 @@ function scWidgetInit() {
     #sc-widget-test .sc-row:hover .sc-row-actions > button,
     #sc-widget-test .sc-row-actions > button.sc-on { opacity: 1; }
     #sc-widget-test .sc-row.sc-now .sc-row-title { color: ${COL_TEXT}; }
-    #sc-widget-test .sc-row:not(.sc-now) .sc-row-title { color: rgba(205, 214, 244, 0.88); }
+    #sc-widget-test .sc-row:not(.sc-now) .sc-row-title { color: rgba(255, 255, 255, 0.88); }
 
     #sc-widget-test .sc-row-now {
       position: absolute; inset: 0; background: rgba(0, 0, 0, 0.5);
@@ -1049,7 +1064,7 @@ function scWidgetInit() {
     const bar = el("div");
     bar.style.cssText = `
       width: 3px; height: 3px; border-radius: 2px;
-      background: linear-gradient(180deg, ${COL_TEXT} 0%, rgba(205, 214, 244, 0.35) 100%);
+      background: linear-gradient(180deg, ${COL_TEXT} 0%, rgba(255, 255, 255, 0.35) 100%);
       opacity: 0.5;
     `;
     eqContainer.appendChild(bar);
@@ -1104,7 +1119,10 @@ function scWidgetInit() {
 
   // Controls: [fav] [prev] [play] [next] [library]
   const controlsRow = el("div");
-  controlsRow.style.cssText = `display: flex; align-items: center; justify-content: center; gap: 6px;`;
+  controlsRow.style.cssText = `
+    display: flex; align-items: center; justify-content: center;
+    column-gap: 6px; row-gap: 6px; flex-wrap: wrap; width: 100%;
+  `;
 
   const favBtn = btn("", 24, "Add to favourites");
   favBtn.id = "sc-widget-fav";
@@ -1227,10 +1245,10 @@ function scWidgetInit() {
 
   // =================== LIBRARY PANEL ===================
   const seg = el("div", "sc-seg");
-  const segRecent = el("button", "sc-active", "Recent");
-  const segFav = el("button", null, "Favourites");
-  seg.appendChild(segRecent);
+  const segFav = el("button", "sc-active", "Favourites");
+  const segRecent = el("button", null, "Recent");
   seg.appendChild(segFav);
+  seg.appendChild(segRecent);
   const libPanel = makePanel("sc-library", seg);
   const libList = el("div", "sc-list");
   libPanel.appendChild(libList);
@@ -1241,7 +1259,7 @@ function scWidgetInit() {
   libFoot.appendChild(libClear);
   libPanel.appendChild(libFoot);
 
-  let libTab = "recent";
+  let libTab = "fav";
   function setLibTab(t) {
     libTab = t;
     segRecent.classList.toggle("sc-active", t === "recent");
@@ -1369,13 +1387,37 @@ function scWidgetInit() {
 
   // =================== VIEW STATE ===================
   let view = "player";
+  let viewHeightCleanup = null;
   function setView(v) {
+    // The player/library/settings panels are different heights, so
+    // swapping which one is visible used to snap the widget's height
+    // instantly. Measure before/after and transition between them instead.
+    if (viewHeightCleanup) { viewHeightCleanup(); viewHeightCleanup = null; }
+    const startH = widgetDiv.getBoundingClientRect().height;
+
     view = v;
     widgetDiv.classList.toggle("sc-panel-open", v !== "player");
     widgetDiv.classList.toggle("sc-view-library", v === "library");
     widgetDiv.classList.toggle("sc-view-settings", v === "settings");
     if (v === "library") renderLibrary();
     if (v === "settings") syncSettingsUI();
+
+    if (startH > 0 && widgetDiv.style.display !== "none") {
+      widgetDiv.style.height = startH + "px";
+      requestAnimationFrame(() => {
+        const endH = widgetDiv.scrollHeight;
+        widgetDiv.style.transition = "height 0.18s ease";
+        widgetDiv.style.height = endH + "px";
+      });
+      const clear = () => {
+        widgetDiv.style.transition = "";
+        widgetDiv.style.height = "";
+        widgetDiv.removeEventListener("transitionend", clear);
+        if (viewHeightCleanup === clear) viewHeightCleanup = null;
+      };
+      widgetDiv.addEventListener("transitionend", clear);
+      viewHeightCleanup = clear;
+    }
     requestAnimationFrame(refreshAllMarquees);
   }
   gearBtn.addEventListener("click", () => setView("settings"));
@@ -1574,7 +1616,15 @@ function scWidgetInit() {
     star.appendChild(iconStar(fav, 11));
     star.addEventListener("click", (e) => {
       e.stopPropagation();
-      toggleFav(it);
+      const nowFav = toggleFav(it);
+      // Only the currently-playing track's like state is known here (it's
+      // read live from the SoundCloud tab); syncing an arbitrary other
+      // row would require navigating away to load its page.
+      if (settings.likeOnFav && it.url === current.url) {
+        if ((nowFav && !current.liked) || (!nowFav && current.liked)) {
+          sendToSoundCloudTab("SCWidget:ToggleLike", "SCWidget:ToggleLikeReply", updateFromInfo);
+        }
+      }
     });
     actions.appendChild(star);
 
@@ -1804,7 +1854,7 @@ function scWidgetInit() {
       displayGlow += (glowTarget - displayGlow) * 0.15;
 
       if (settings.glow) {
-        const shadow = "0 0 " + (8 + displayGlow * 26).toFixed(1) + "px rgba(205, 214, 244, " +
+        const shadow = "0 0 " + (8 + displayGlow * 26).toFixed(1) + "px rgba(255, 255, 255, " +
           (0.12 + displayGlow * 0.4).toFixed(2) + ")";
         if (mini) miniArtWrap.style.boxShadow = shadow;
         else artworkWrapper.style.boxShadow = shadow;
@@ -1851,8 +1901,32 @@ function scWidgetInit() {
   }
 
   function playEntry(it) {
-    sendToSoundCloudTab("SCWidget:PlayUrl", null, null, { url: it.url });
     setView("player");
+    const existing = findSoundCloudTab();
+    if (!existing) {
+      // No SoundCloud tab open at all -> sendToSoundCloudTab would just
+      // hideWidget() and silently do nothing. Open one at the track and
+      // deliver PlayUrl once its frame script is up, so favourites/history
+      // work even when the site isn't already open somewhere.
+      let tab;
+      try {
+        tab = gBrowser.addTab(it.url, { triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal() });
+        gBrowser.selectedTab = tab;
+      } catch (e) {
+        console.log("[SC-WIDGET] open tab for playEntry failed: " + (e && e.message));
+        return;
+      }
+      const mm = tab.linkedBrowser.messageManager;
+      const send = () => { try { mm.sendAsyncMessage("SCWidget:PlayUrl", { url: it.url }); } catch (e) {} };
+      // The frame script loads process-wide, but give the new tab a moment
+      // to spin up; retry a couple of times in case the first send races it.
+      setTimeout(send, 500);
+      setTimeout(send, 1500);
+      setTimeout(pollInfo, 1800);
+      setTimeout(pollInfo, 3000);
+      return;
+    }
+    sendToSoundCloudTab("SCWidget:PlayUrl", null, null, { url: it.url });
     setTimeout(pollInfo, 600);
     setTimeout(pollInfo, 1500);
   }
@@ -2002,8 +2076,13 @@ function scWidgetInit() {
     favBtn.classList.remove("sc-pop");
     void favBtn.offsetWidth;
     favBtn.classList.add("sc-pop");
-    if (nowFav && settings.likeOnFav && !current.liked) {
-      sendToSoundCloudTab("SCWidget:ToggleLike", "SCWidget:ToggleLikeReply", updateFromInfo);
+    // Keep the SoundCloud like in sync in both directions: liking when a
+    // track is favourited, and un-liking when it's un-favourited (this used
+    // to only ever add the like, never remove it).
+    if (settings.likeOnFav) {
+      if ((nowFav && !current.liked) || (!nowFav && current.liked)) {
+        sendToSoundCloudTab("SCWidget:ToggleLike", "SCWidget:ToggleLikeReply", updateFromInfo);
+      }
     }
   });
 
