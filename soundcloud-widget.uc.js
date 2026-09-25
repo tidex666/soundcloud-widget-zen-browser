@@ -3,6 +3,13 @@
 // @include        main
 // ==/UserScript==
 //
+// v1.2.0
+//  - Fix: minimize button no longer shows in minimized mode.
+//  - Fix: audio hook used a global (exportFunction) that doesn't exist in
+//    frame scripts, so it silently never installed. Now uses Cu.exportFunction.
+//  - EQ only taps when its AudioContext is running (never mutes music),
+//    retries automatically, and reports status (hover the EQ bars).
+//
 // v1.1.0
 //  - Widget now lives in normal layout flow above Zen's sidebar footer
 //    (reserves its own space, tabs scroll above it instead of going under).
@@ -21,8 +28,17 @@ console.log("[SC-WIDGET] script file loaded");
 function scFrameScript(EQ_BAR_COUNT) {
   "use strict";
 
+  // exportFunction is NOT a global in frame scripts on every build ->
+  // the old hook threw "exportFunction is not defined" and silently died.
+  const XF = (typeof exportFunction === "function")
+    ? exportFunction
+    : Components.utils.exportFunction;
+
+  let lastStatus = "";
   function log(m) {
+    lastStatus = m;
     try { console.log("[SC-WIDGET][audio] " + m); } catch (e) {}
+    try { sendAsyncMessage("SCWidget:Status", { status: m }); } catch (e) {}
   }
 
   function isSoundCloud(win) {
@@ -156,6 +172,7 @@ function scFrameScript(EQ_BAR_COUNT) {
   } catch (e) {}
 
   let tap = null;        // { doc, ctx, analyser, freq }
+  let seenEls = [];      // media elements caught by the play() hook (may be detached)
   let graphTaps = [];    // analysers on the page's own AudioContexts
 
   function makeAnalyser(ctx) {
@@ -165,15 +182,24 @@ function scFrameScript(EQ_BAR_COUNT) {
     return { analyser: a, freq: new Uint8Array(a.frequencyBinCount) };
   }
 
+  // Returns a tap only if its AudioContext is RUNNING. Routing the
+  // element into a suspended context would silence the music, so we
+  // never do that; we just retry later.
   function ensureTap(win) {
     const doc = win.document;
-    if (tap && tap.doc === doc) return tap;
+    if (tap && tap.doc === doc) {
+      if (tap.ctx.state !== "running") { try { tap.ctx.resume(); } catch (e) {} }
+      return tap.ctx.state === "running" ? tap : null;
+    }
     const ctx = new win.AudioContext();
+    if (ctx.state !== "running") {
+      try { ctx.resume(); } catch (e) {}
+    }
     const a = makeAnalyser(ctx);
     a.analyser.connect(ctx.destination);
     tap = { doc: doc, ctx: ctx, analyser: a.analyser, freq: a.freq };
     log("AudioContext created (state=" + ctx.state + ")");
-    return tap;
+    return ctx.state === "running" ? tap : null;
   }
 
   function resumeTapContext() {
@@ -200,13 +226,11 @@ function scFrameScript(EQ_BAR_COUNT) {
         return;
       }
 
-      const ua = win.navigator && win.navigator.userActivation;
-      if (ua && !ua.hasBeenActive) {
-        log("page has no user activation yet, will tap on next play");
+      const t = ensureTap(win);
+      if (!t) {
+        log("AudioContext not running yet (autoplay policy), retrying. Click anywhere in the SoundCloud tab once.");
         return;
       }
-
-      const t = ensureTap(win);
       const node = t.ctx.createMediaElementSource(el);
       node.connect(t.analyser);
       el.__scWidgetTapped = true;
@@ -223,6 +247,8 @@ function scFrameScript(EQ_BAR_COUNT) {
     try {
       if (!el || el.__scWidgetWatched) return;
       el.__scWidgetWatched = true;
+      seenEls.push(el);
+      log("caught media element, src=" + String(el.currentSrc || el.src || "(none yet)").slice(0, 60));
       el.addEventListener("playing", function () { tapElement(el, win); });
     } catch (e) {}
   }
@@ -247,7 +273,7 @@ function scFrameScript(EQ_BAR_COUNT) {
           return origPlay.apply(this, arguments);
         };
         Object.defineProperty(proto, "play", {
-          value: exportFunction(hookedPlay, uw),
+          value: XF(hookedPlay, uw),
           writable: true,
           configurable: true
         });
@@ -280,7 +306,7 @@ function scFrameScript(EQ_BAR_COUNT) {
           return origConnect.apply(this, arguments);
         };
         Object.defineProperty(nproto, "connect", {
-          value: exportFunction(hookedConnect, uw),
+          value: XF(hookedConnect, uw),
           writable: true,
           configurable: true
         });
@@ -318,6 +344,7 @@ function scFrameScript(EQ_BAR_COUNT) {
       if (win === content) {
         tap = null;
         graphTaps = [];
+        seenEls = [];
       }
       installHooks(win);
     } catch (e) {}
@@ -370,12 +397,20 @@ function scFrameScript(EQ_BAR_COUNT) {
 
   let tick = 0;
   function frame() {
-    let next = 1000;
+    let next = 500;
     try {
       if (!content) return; // tab is gone -> stop the loop
       tick++;
       if (isSoundCloud(content)) {
-        if (!tap && tick % 5 === 0) scanForMedia();
+        if (tick % 5 === 0) {
+          scanForMedia();
+          for (const el of seenEls) {
+            try { if (!el.__scWidgetTapped && !el.paused) tapElement(el, content); } catch (e) {}
+          }
+          if (!seenEls.length && tick % 100 === 0) {
+            log("no media element seen yet. Reload the SoundCloud tab once so the hook loads before SoundCloud does.");
+          }
+        }
 
         const sources = [];
         if (tap) sources.push(tap);
@@ -468,6 +503,7 @@ function scWidgetInit() {
     #sc-widget-test.sc-min { padding: 6px 8px !important; border-radius: 12px !important; }
     #sc-widget-test.sc-min #sc-full { display: none !important; }
     #sc-widget-test:not(.sc-min) #sc-mini { display: none !important; }
+    #sc-widget-test.sc-min #sc-widget-minbtn { display: none !important; }
 
     #sc-widget-minbtn { opacity: 0.35; }
     #sc-widget-test:hover #sc-widget-minbtn { opacity: 1; }
@@ -998,6 +1034,19 @@ function scWidgetInit() {
   const FRAME_SCRIPT = "(" + scFrameScript.toString() + ")(" + EQ_BAR_COUNT + ");";
   window.messageManager.loadFrameScript(
     "data:application/javascript;charset=utf-8," + encodeURIComponent(FRAME_SCRIPT), true);
+
+  // Audio tap status -> hover the EQ bars to see it, also in Browser Console.
+  let lastStatusText = "";
+  window.messageManager.addMessageListener("SCWidget:Status", (msg) => {
+    const currentTab = findSoundCloudTab();
+    if (!currentTab || currentTab.linkedBrowser !== msg.target) return;
+    const st = (msg.data && msg.data.status) || "";
+    if (st === lastStatusText) return;
+    lastStatusText = st;
+    eqContainer.title = "EQ: " + st;
+    miniEq.title = "EQ: " + st;
+    console.log("[SC-WIDGET][tab] " + st);
+  });
 
   window.messageManager.addMessageListener("SCWidget:AudioData", (msg) => {
     const currentTab = findSoundCloudTab();
