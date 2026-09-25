@@ -3,6 +3,11 @@
 // @include        main
 // ==/UserScript==
 //
+// v1.4.0
+//  - Settings panel (gear icon): EQ sensitivity slider, EQ on/off, glow on/off. Saved.
+//  - Artwork blur state is remembered.
+//  - Scroll on progress bar = Âą5s, hover shows time, click cover = go to tab.
+//
 // v1.3.0
 //  - More sensitive EQ (hotter analyser range + auto-gain). Tweak EQ_SENSITIVITY.
 //  - Long titles no longer widen the widget; they scroll (marquee) instead.
@@ -463,8 +468,29 @@ function scWidgetInit() {
 
   const EQ_BAR_COUNT = 14;
   const MINI_BAR_COUNT = 4;
-  // EQ sensitivity: 1 = calm, 1.6 = default, 2.5+ = very jumpy
-  const EQ_SENSITIVITY = 1.6;
+  // ---- Settings (saved in about:config under "sc-widget.*") ----
+  const DEFAULTS = { sensitivity: 1.6, glow: true, showEq: true, blur: false };
+  function prefGetBool(name, def) {
+    try { return Services.prefs.getBoolPref("sc-widget." + name, def); } catch (e) { return def; }
+  }
+  function prefSetBool(name, v) {
+    try { Services.prefs.setBoolPref("sc-widget." + name, v); } catch (e) {}
+  }
+  function prefGetNum(name, def) {
+    try {
+      const v = parseFloat(Services.prefs.getStringPref("sc-widget." + name, String(def)));
+      return isFinite(v) ? v : def;
+    } catch (e) { return def; }
+  }
+  function prefSetNum(name, v) {
+    try { Services.prefs.setStringPref("sc-widget." + name, String(v)); } catch (e) {}
+  }
+  const settings = {
+    sensitivity: prefGetNum("sensitivity", DEFAULTS.sensitivity),
+    glow: prefGetBool("glow", DEFAULTS.glow),
+    showEq: prefGetBool("showEq", DEFAULTS.showEq),
+    blur: prefGetBool("blur", DEFAULTS.blur)
+  };
   const PREF_MIN = "sc-widget.minimized";
   const SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -540,6 +566,35 @@ function scWidgetInit() {
       85%, 100% { transform: translateX(var(--sc-shift, 0px)); }
     }
 
+    #sc-widget-test.sc-min #sc-widget-gear { display: none !important; }
+    #sc-widget-test.sc-settings-open #sc-full,
+    #sc-widget-test.sc-settings-open #sc-mini,
+    #sc-widget-test.sc-settings-open #sc-widget-minbtn,
+    #sc-widget-test.sc-settings-open #sc-widget-gear { display: none !important; }
+    #sc-widget-test:not(.sc-settings-open) #sc-settings { display: none !important; }
+    #sc-widget-test.sc-no-eq #sc-widget-eq,
+    #sc-widget-test.sc-no-eq #sc-mini-eq { display: none !important; }
+
+    #sc-widget-gear { opacity: 0.35; }
+    #sc-widget-test:hover #sc-widget-gear { opacity: 1; }
+
+    #sc-settings input[type="range"] {
+      width: 100%; margin: 0; accent-color: ${COL_TEXT}; cursor: pointer;
+    }
+    .sc-toggle {
+      width: 26px; height: 14px; border-radius: 7px; flex-shrink: 0;
+      background: ${COL_TRACK}; position: relative; cursor: pointer;
+      transition: background-color 0.15s ease;
+    }
+    .sc-toggle::after {
+      content: ""; position: absolute; top: 2px; left: 2px;
+      width: 10px; height: 10px; border-radius: 50%;
+      background: ${COL_TEXT_DIM}; transition: transform 0.15s ease, background-color 0.15s ease;
+    }
+    .sc-toggle.sc-on { background: rgba(205, 214, 244, 0.45); }
+    .sc-toggle.sc-on::after { transform: translateX(12px); background: ${COL_TEXT}; }
+    #sc-artwork-click, #sc-mini-art-click { cursor: pointer; }
+
     #sc-widget-minbtn { opacity: 0.35; }
     #sc-widget-test:hover #sc-widget-minbtn { opacity: 1; }
   `;
@@ -605,6 +660,33 @@ function scWidgetInit() {
   minBtn.appendChild(buildChevron(false));
   widgetDiv.appendChild(minBtn);
 
+  function buildGear() {
+    const svg = document.createElementNS(SVG_NS, "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("width", "11");
+    svg.setAttribute("height", "11");
+    svg.setAttribute("fill", "none");
+    svg.setAttribute("stroke", COL_TEXT);
+    svg.setAttribute("stroke-width", "2.2");
+    svg.setAttribute("stroke-linecap", "round");
+    svg.setAttribute("stroke-linejoin", "round");
+    const c = document.createElementNS(SVG_NS, "circle");
+    c.setAttribute("cx", "12"); c.setAttribute("cy", "12"); c.setAttribute("r", "3");
+    svg.appendChild(c);
+    const p = document.createElementNS(SVG_NS, "path");
+    p.setAttribute("d", "M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 11-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 110-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 114 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 110 4h-.09a1.65 1.65 0 00-1.51 1z");
+    svg.appendChild(p);
+    return svg;
+  }
+  const gearBtn = circleBtn("sc-widget-gear", 18, COL_SURFACE);
+  gearBtn.title = "Settings";
+  gearBtn.style.position = "absolute";
+  gearBtn.style.top = "6px";
+  gearBtn.style.left = "6px";
+  gearBtn.style.zIndex = "2";
+  gearBtn.appendChild(buildGear());
+  widgetDiv.appendChild(gearBtn);
+
   // =================== FULL VIEW ===================
   const fullBody = document.createElement("div");
   fullBody.id = "sc-full";
@@ -625,6 +707,8 @@ function scWidgetInit() {
     width: 100%; height: 100%; background-size: cover;
     background-position: center; transition: filter 0.15s ease;
   `;
+  artworkEl.id = "sc-artwork-click";
+  artworkEl.title = "Go to SoundCloud tab";
   artworkWrapper.appendChild(artworkEl);
 
   // Eye (blur artwork)
@@ -672,12 +756,16 @@ function scWidgetInit() {
   setEyeIcon(false);
 
   let artworkHidden = false;
-  eyeBtn.addEventListener("click", () => {
-    artworkHidden = !artworkHidden;
-    const f = artworkHidden ? "blur(16px)" : "none";
-    artworkEl.style.filter = f;
-    miniArt.style.filter = artworkHidden ? "blur(8px)" : "none";
-    setEyeIcon(artworkHidden);
+  function applyBlur(v) {
+    artworkHidden = v;
+    artworkEl.style.filter = v ? "blur(16px)" : "none";
+    miniArt.style.filter = v ? "blur(8px)" : "none";
+    setEyeIcon(v);
+  }
+  eyeBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    applyBlur(!artworkHidden);
+    prefSetBool("blur", artworkHidden);
   });
   artworkWrapper.appendChild(eyeBtn);
 
@@ -690,7 +778,7 @@ function scWidgetInit() {
     width: 100%; text-align: center;
   `;
   const titleText = document.createElement("span");
-  titleText.textContent = "â€”";
+  titleText.textContent = "â";
   titleEl.appendChild(titleText);
 
   // EQ
@@ -809,6 +897,8 @@ function scWidgetInit() {
     width: 100%; height: 100%; background-size: cover;
     background-position: center; transition: filter 0.15s ease;
   `;
+  miniArt.id = "sc-mini-art-click";
+  miniArt.title = "Go to SoundCloud tab";
   miniArtWrap.appendChild(miniArt);
 
   const miniText = document.createElement("div");
@@ -817,7 +907,7 @@ function scWidgetInit() {
   miniTitle.className = "sc-marquee";
   miniTitle.style.cssText = `color: ${COL_TEXT}; font-size: 11px; font-weight: 600; width: 100%;`;
   const miniTitleText = document.createElement("span");
-  miniTitleText.textContent = "â€”";
+  miniTitleText.textContent = "â";
   miniTitle.appendChild(miniTitleText);
   const miniProgress = document.createElement("div");
   miniProgress.style.cssText = `width: 100%; height: 3px; background: ${COL_TRACK}; border-radius: 2px; cursor: pointer;`;
@@ -828,6 +918,7 @@ function scWidgetInit() {
   miniText.appendChild(miniProgress);
 
   const miniEq = document.createElement("div");
+  miniEq.id = "sc-mini-eq";
   miniEq.style.cssText = `display: flex; align-items: flex-end; gap: 2px; height: 14px; flex-shrink: 0;`;
   const miniBarEls = [];
   for (let i = 0; i < MINI_BAR_COUNT; i++) {
@@ -851,6 +942,131 @@ function scWidgetInit() {
   miniRow.appendChild(miniPlayBtn);
   miniRow.appendChild(expandBtn);
   widgetDiv.appendChild(miniRow);
+
+  // =================== SETTINGS PANEL ===================
+  const settingsPanel = document.createElement("div");
+  settingsPanel.id = "sc-settings";
+  settingsPanel.style.cssText = `
+    display: flex; flex-direction: column; gap: 10px; width: 100%; min-width: 0;
+    color: ${COL_TEXT}; font-size: 11px;
+  `;
+
+  const sHeader = document.createElement("div");
+  sHeader.style.cssText = `display: flex; align-items: center; justify-content: space-between;`;
+  const sTitle = document.createElement("div");
+  sTitle.textContent = "Settings";
+  sTitle.style.cssText = `font-weight: 700; font-size: 12px;`;
+  const sClose = circleBtn("sc-settings-close", 18, COL_SURFACE);
+  sClose.title = "Done";
+  sClose.appendChild(buildChevron(true));
+  sHeader.appendChild(sTitle);
+  sHeader.appendChild(sClose);
+  settingsPanel.appendChild(sHeader);
+
+  // Sensitivity slider
+  const sensBox = document.createElement("div");
+  sensBox.style.cssText = `display: flex; flex-direction: column; gap: 5px;`;
+  const sensLabelRow = document.createElement("div");
+  sensLabelRow.style.cssText = `display: flex; justify-content: space-between; color: ${COL_TEXT_DIM};`;
+  const sensLabel = document.createElement("span");
+  sensLabel.textContent = "EQ sensitivity";
+  const sensValue = document.createElement("span");
+  sensValue.style.cssText = `font-variant-numeric: tabular-nums; color: ${COL_TEXT};`;
+  sensLabelRow.appendChild(sensLabel);
+  sensLabelRow.appendChild(sensValue);
+  const sensSlider = document.createElement("input");
+  sensSlider.type = "range";
+  sensSlider.min = "0.5";
+  sensSlider.max = "3.5";
+  sensSlider.step = "0.1";
+  sensBox.appendChild(sensLabelRow);
+  sensBox.appendChild(sensSlider);
+  settingsPanel.appendChild(sensBox);
+
+  function toggleRow(label, key, onApply) {
+    const row = document.createElement("div");
+    row.style.cssText = `display: flex; align-items: center; justify-content: space-between; gap: 8px; cursor: pointer;`;
+    const l = document.createElement("span");
+    l.textContent = label;
+    l.style.color = COL_TEXT_DIM;
+    const t = document.createElement("div");
+    t.className = "sc-toggle";
+    row.appendChild(l);
+    row.appendChild(t);
+    const sync = () => t.classList.toggle("sc-on", !!settings[key]);
+    row.addEventListener("click", () => {
+      settings[key] = !settings[key];
+      prefSetBool(key, settings[key]);
+      sync();
+      onApply();
+    });
+    settingsPanel.appendChild(row);
+    return sync;
+  }
+
+  function applyVisualSettings() {
+    widgetDiv.classList.toggle("sc-no-eq", !settings.showEq);
+    if (!settings.glow) {
+      artworkWrapper.style.boxShadow = "none";
+      miniArtWrap.style.boxShadow = "none";
+    }
+    requestAnimationFrame(() => { try { refreshAllMarquees(); } catch (e) {} });
+  }
+
+  const syncEq = toggleRow("Show equalizer", "showEq", applyVisualSettings);
+  const syncGlow = toggleRow("Artwork glow", "glow", applyVisualSettings);
+
+  const resetBtn = document.createElement("button");
+  resetBtn.textContent = "Reset to defaults";
+  resetBtn.style.cssText = `
+    border: none; border-radius: 8px; padding: 5px 8px; cursor: pointer;
+    background: ${COL_SURFACE}; color: ${COL_TEXT_DIM}; font-size: 10px;
+    -moz-window-dragging: no-drag; appearance: none;
+  `;
+  settingsPanel.appendChild(resetBtn);
+
+  const tip = document.createElement("div");
+  tip.textContent = "Tip: scroll on the progress bar to skip Âą5s, click the cover to jump to the tab.";
+  tip.style.cssText = `color: ${COL_TEXT_DIM}; font-size: 9.5px; line-height: 1.35; opacity: 0.8;`;
+  settingsPanel.appendChild(tip);
+
+  widgetDiv.appendChild(settingsPanel);
+
+  function syncSettingsUI() {
+    sensSlider.value = String(settings.sensitivity);
+    sensValue.textContent = settings.sensitivity.toFixed(1) + "Ă";
+    syncEq();
+    syncGlow();
+  }
+
+  sensSlider.addEventListener("input", () => {
+    settings.sensitivity = parseFloat(sensSlider.value);
+    sensValue.textContent = settings.sensitivity.toFixed(1) + "Ă";
+  });
+  sensSlider.addEventListener("change", () => prefSetNum("sensitivity", settings.sensitivity));
+
+  resetBtn.addEventListener("click", () => {
+    settings.sensitivity = DEFAULTS.sensitivity;
+    settings.glow = DEFAULTS.glow;
+    settings.showEq = DEFAULTS.showEq;
+    prefSetNum("sensitivity", settings.sensitivity);
+    prefSetBool("glow", settings.glow);
+    prefSetBool("showEq", settings.showEq);
+    syncSettingsUI();
+    applyVisualSettings();
+  });
+
+  gearBtn.addEventListener("click", () => {
+    syncSettingsUI();
+    widgetDiv.classList.add("sc-settings-open");
+  });
+  sClose.addEventListener("click", () => {
+    widgetDiv.classList.remove("sc-settings-open");
+    requestAnimationFrame(() => { try { refreshAllMarquees(); } catch (e) {} });
+  });
+
+  syncSettingsUI();
+  applyBlur(settings.blur);
 
   setPlayIcon(icon, 1);
   setPlayIcon(miniIcon, 0.6);
@@ -940,6 +1156,8 @@ function scWidgetInit() {
     mo.observe(miniTitle);
   } catch (e) {}
 
+  applyVisualSettings();
+
   // =================== STATE / UPDATES ===================
   function formatTime(totalSeconds) {
     const s = Math.max(0, Math.floor(totalSeconds || 0));
@@ -959,6 +1177,8 @@ function scWidgetInit() {
   }
 
   let lastArtworkUrl = null;
+  let lastCurrent = 0;
+  let lastDuration = 0;
   let widgetVisible = false;
   let isPlaying = false;
   let isMuted = false;
@@ -1020,6 +1240,8 @@ function scWidgetInit() {
 
     const current = data.currentTime || 0;
     const duration = data.duration || 0;
+    lastCurrent = current;
+    lastDuration = duration;
     timeEl.textContent = formatTime(current) + " / " + formatTime(duration);
     const percent = duration > 0 ? (current / duration) * 100 : 0;
     progressFill.style.width = percent + "%";
@@ -1079,8 +1301,10 @@ function scWidgetInit() {
 
       const shadow = "0 0 " + (8 + displayGlow * 26).toFixed(1) + "px rgba(205, 214, 244, " +
         (0.12 + displayGlow * 0.4).toFixed(2) + ")";
-      artworkWrapper.style.boxShadow = shadow;
-      miniArtWrap.style.boxShadow = shadow;
+      if (settings.glow) {
+        artworkWrapper.style.boxShadow = shadow;
+        miniArtWrap.style.boxShadow = shadow;
+      }
     }
     requestAnimationFrame(animateEq);
   }
@@ -1127,10 +1351,10 @@ function scWidgetInit() {
     let peak = 0;
     for (const v of raw) if (v > peak) peak = v;
     agcPeak = Math.max(peak, agcPeak * 0.985, 0.2);
-    const gain = EQ_SENSITIVITY / agcPeak;
+    const gain = settings.sensitivity / agcPeak;
     targetBars = raw.map((v) => Math.min(1, Math.pow(Math.min(1, v * gain * 0.75), 1.15)));
     const lvl = typeof msg.data.level === "number" ? msg.data.level : 0;
-    targetGlow = Math.min(1, lvl * 2.2 * EQ_SENSITIVITY / Math.max(agcPeak, 0.3));
+    targetGlow = Math.min(1, lvl * 2.2 * settings.sensitivity / Math.max(agcPeak, 0.3));
     if (targetGlow > 0.004) lastLoudTime = now;
   });
 
@@ -1196,6 +1420,41 @@ function scWidgetInit() {
   }
   progressOuter.addEventListener("click", seekFrom(progressOuter));
   miniProgress.addEventListener("click", seekFrom(miniProgress));
+
+  // Scroll on the progress bar = skip Âą5s
+  function wheelSeek(e) {
+    if (!lastDuration) return;
+    e.preventDefault();
+    const delta = e.deltaY > 0 || e.deltaX > 0 ? 5 : -5;
+    const target = Math.min(lastDuration - 0.5, Math.max(0, lastCurrent + delta));
+    lastCurrent = target;
+    const percent = target / lastDuration;
+    progressFill.style.width = percent * 100 + "%";
+    miniProgressFill.style.width = percent * 100 + "%";
+    sendToSoundCloudTab("SCWidget:Seek", "SCWidget:SeekReply", updateFromInfo, { percent });
+  }
+  progressOuter.addEventListener("wheel", wheelSeek, { passive: false });
+  miniProgress.addEventListener("wheel", wheelSeek, { passive: false });
+
+  // Hover the progress bar = show the time you'd jump to
+  function hoverTime(el) {
+    return (e) => {
+      if (!lastDuration) return;
+      const rect = el.getBoundingClientRect();
+      const pct = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+      el.title = formatTime(pct * lastDuration);
+    };
+  }
+  progressOuter.addEventListener("mousemove", hoverTime(progressOuter));
+  miniProgress.addEventListener("mousemove", hoverTime(miniProgress));
+
+  // Click cover = jump to the SoundCloud tab
+  function goToTab() {
+    const tab = findSoundCloudTab();
+    if (tab) gBrowser.selectedTab = tab;
+  }
+  artworkEl.addEventListener("click", goToTab);
+  miniArt.addEventListener("click", goToTab);
 
   // Don't draw over the urlbar results panel
   try {
