@@ -3,6 +3,10 @@
 // @include        main
 // ==/UserScript==
 //
+// v1.3.0
+//  - More sensitive EQ (hotter analyser range + auto-gain). Tweak EQ_SENSITIVITY.
+//  - Long titles no longer widen the widget; they scroll (marquee) instead.
+//
 // v1.2.0
 //  - Fix: minimize button no longer shows in minimized mode.
 //  - Fix: audio hook used a global (exportFunction) that doesn't exist in
@@ -178,7 +182,9 @@ function scFrameScript(EQ_BAR_COUNT) {
   function makeAnalyser(ctx) {
     const a = ctx.createAnalyser();
     a.fftSize = 256;
-    a.smoothingTimeConstant = 0.72;
+    a.smoothingTimeConstant = 0.5;   // less smoothing = snappier
+    a.minDecibels = -90;
+    a.maxDecibels = -35;             // default is -30, lower = hotter bars
     return { analyser: a, freq: new Uint8Array(a.frequencyBinCount) };
   }
 
@@ -383,7 +389,7 @@ function scFrameScript(EQ_BAR_COUNT) {
         if (v > peak) peak = v;
       }
       const v = (total / (e - s) / 255) * 0.6 + (peak / 255) * 0.4;
-      bars[i] = Math.min(1, Math.pow(v, 0.75) * (0.85 + i * 0.025));
+      bars[i] = Math.min(1, Math.pow(v, 0.6) * (0.9 + i * 0.04));
       sum += v;
     }
     return { bars: bars, level: sum / EQ_BAR_COUNT };
@@ -457,6 +463,8 @@ function scWidgetInit() {
 
   const EQ_BAR_COUNT = 14;
   const MINI_BAR_COUNT = 4;
+  // EQ sensitivity: 1 = calm, 1.6 = default, 2.5+ = very jumpy
+  const EQ_SENSITIVITY = 1.6;
   const PREF_MIN = "sc-widget.minimized";
   const SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -479,6 +487,9 @@ function scWidgetInit() {
     align-items: stretch;
     flex-shrink: 0;
     min-width: 0;
+    max-width: calc(100% - 16px);
+    contain: inline-size;      /* content (long titles) can't widen the widget */
+    overflow: hidden;
     margin: 6px 8px 8px;
     padding: 10px 12px;
     box-sizing: border-box;
@@ -504,6 +515,30 @@ function scWidgetInit() {
     #sc-widget-test.sc-min #sc-full { display: none !important; }
     #sc-widget-test:not(.sc-min) #sc-mini { display: none !important; }
     #sc-widget-test.sc-min #sc-widget-minbtn { display: none !important; }
+
+    .sc-marquee {
+      overflow: hidden;
+      white-space: nowrap;
+      min-width: 0;
+      max-width: 100%;
+    }
+    .sc-marquee.sc-scrolling {
+      mask-image: linear-gradient(90deg, transparent 0, #000 8px, #000 calc(100% - 8px), transparent 100%);
+    }
+    .sc-marquee > span {
+      display: inline-block;
+      white-space: nowrap;
+      will-change: transform;
+    }
+    .sc-marquee.sc-scrolling > span {
+      padding: 0 8px;
+      animation: sc-marquee var(--sc-dur, 8s) ease-in-out infinite alternate;
+    }
+    .sc-marquee.sc-scrolling:hover > span { animation-play-state: paused; }
+    @keyframes sc-marquee {
+      0%, 15%   { transform: translateX(0); }
+      85%, 100% { transform: translateX(var(--sc-shift, 0px)); }
+    }
 
     #sc-widget-minbtn { opacity: 0.35; }
     #sc-widget-test:hover #sc-widget-minbtn { opacity: 1; }
@@ -649,12 +684,14 @@ function scWidgetInit() {
   // Title
   const titleEl = document.createElement("div");
   titleEl.id = "sc-widget-title";
+  titleEl.className = "sc-marquee";
   titleEl.style.cssText = `
     color: ${COL_TEXT}; font-size: 11px; font-weight: 600;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-    max-width: 100%; text-align: center;
+    width: 100%; text-align: center;
   `;
-  titleEl.textContent = "â€”";
+  const titleText = document.createElement("span");
+  titleText.textContent = "â€”";
+  titleEl.appendChild(titleText);
 
   // EQ
   const eqContainer = document.createElement("div");
@@ -777,11 +814,11 @@ function scWidgetInit() {
   const miniText = document.createElement("div");
   miniText.style.cssText = `flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px;`;
   const miniTitle = document.createElement("div");
-  miniTitle.style.cssText = `
-    color: ${COL_TEXT}; font-size: 11px; font-weight: 600;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  `;
-  miniTitle.textContent = "â€”";
+  miniTitle.className = "sc-marquee";
+  miniTitle.style.cssText = `color: ${COL_TEXT}; font-size: 11px; font-weight: 600; width: 100%;`;
+  const miniTitleText = document.createElement("span");
+  miniTitleText.textContent = "â€”";
+  miniTitle.appendChild(miniTitleText);
   const miniProgress = document.createElement("div");
   miniProgress.style.cssText = `width: 100%; height: 3px; background: ${COL_TRACK}; border-radius: 2px; cursor: pointer;`;
   const miniProgressFill = document.createElement("div");
@@ -820,6 +857,7 @@ function scWidgetInit() {
 
   function setMinimized(v, persist) {
     widgetDiv.classList.toggle("sc-min", v);
+    requestAnimationFrame(() => { try { refreshAllMarquees(); } catch (e) {} });
     if (persist) writeMinPref(v);
   }
   setMinimized(readMinPref(), false);
@@ -877,6 +915,31 @@ function scWidgetInit() {
     }, 500);
   }
 
+  // =================== TITLE MARQUEE ===================
+  // If the title doesn't fit, it slides left -> right and back (pauses on hover).
+  function refreshMarquee(box, inner) {
+    box.classList.remove("sc-scrolling");
+    const overflow = inner.scrollWidth - box.clientWidth;
+    if (box.clientWidth > 0 && overflow > 2) {
+      const shift = overflow + 16; // + padding
+      box.style.setProperty("--sc-shift", -shift + "px");
+      box.style.setProperty("--sc-dur", Math.max(4, shift / 22).toFixed(1) + "s");
+      box.style.textAlign = "left";
+      box.classList.add("sc-scrolling");
+    } else {
+      box.style.textAlign = box === titleEl ? "center" : "left";
+    }
+  }
+  function refreshAllMarquees() {
+    refreshMarquee(titleEl, titleText);
+    refreshMarquee(miniTitle, miniTitleText);
+  }
+  try {
+    const mo = new ResizeObserver(() => refreshAllMarquees());
+    mo.observe(titleEl);
+    mo.observe(miniTitle);
+  } catch (e) {}
+
   // =================== STATE / UPDATES ===================
   function formatTime(totalSeconds) {
     const s = Math.max(0, Math.floor(totalSeconds || 0));
@@ -904,6 +967,7 @@ function scWidgetInit() {
     if (!widgetVisible) {
       widgetDiv.style.display = "flex";
       widgetVisible = true;
+      requestAnimationFrame(refreshAllMarquees);
     }
   }
 
@@ -940,9 +1004,13 @@ function scWidgetInit() {
 
     if (data.trackTitle) {
       const t = cleanTrackTitle(data.trackTitle);
-      titleEl.textContent = t;
-      miniTitle.textContent = t;
-      miniRow.title = t;
+      if (titleText.textContent !== t) {
+        titleText.textContent = t;
+        miniTitleText.textContent = t;
+        miniRow.title = t;
+        titleEl.title = t;
+        requestAnimationFrame(refreshAllMarquees);
+      }
     }
 
     if (typeof data.muted === "boolean") {
@@ -965,6 +1033,7 @@ function scWidgetInit() {
   let displayGlow = 0;
   let lastAudioMsgTime = 0;
   let lastLoudTime = 0;
+  let agcPeak = 0.5;
 
   function idleBarValue(i, now) {
     return 0.12 + 0.10 * Math.sin(now / 320 + i * 0.75) + 0.05 * Math.sin(now / 130 + i * 1.9);
@@ -982,7 +1051,7 @@ function scWidgetInit() {
         else if (isPlaying) t = Math.max(0, idleBarValue(i, now));
         else t = 0;
         // fast attack, slower release = punchier bars
-        const k = t > displayBars[i] ? 0.55 : 0.2;
+        const k = t > displayBars[i] ? 0.7 : 0.25;
         displayBars[i] += (t - displayBars[i]) * k;
       }
 
@@ -1053,8 +1122,15 @@ function scWidgetInit() {
     if (!currentTab || currentTab.linkedBrowser !== msg.target) return;
     const now = Date.now();
     lastAudioMsgTime = now;
-    targetBars = msg.data.bars || new Array(EQ_BAR_COUNT).fill(0);
-    targetGlow = typeof msg.data.level === "number" ? Math.min(1, msg.data.level * 1.6) : 0;
+    const raw = msg.data.bars || new Array(EQ_BAR_COUNT).fill(0);
+    // Auto-gain: quiet tracks get boosted so the bars always move.
+    let peak = 0;
+    for (const v of raw) if (v > peak) peak = v;
+    agcPeak = Math.max(peak, agcPeak * 0.985, 0.2);
+    const gain = EQ_SENSITIVITY / agcPeak;
+    targetBars = raw.map((v) => Math.min(1, Math.pow(Math.min(1, v * gain * 0.75), 1.15)));
+    const lvl = typeof msg.data.level === "number" ? msg.data.level : 0;
+    targetGlow = Math.min(1, lvl * 2.2 * EQ_SENSITIVITY / Math.max(agcPeak, 0.3));
     if (targetGlow > 0.004) lastLoudTime = now;
   });
 
