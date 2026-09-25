@@ -7,6 +7,14 @@
 // NOTE: keep this file pure ASCII. The loader reads it as Latin-1, so any
 // raw UTF-8 symbol shows up as garbage. Use \uXXXX escapes in strings.
 //
+// v2.1.1
+//  - Favourite/library buttons split out of the prev/play/next row into
+//    their own row, so play is always dead-center and never wraps with
+//    them at narrow widths.
+//  - Settings card background dropped to transparent (border only) so it
+//    doesn't fight the glass background.
+//  - "Clear history" / "Reset settings" pills now shrink/wrap instead of
+//    spilling past the widget edge when narrow.
 // v2.1.0
 //  - Favourites now come before Recent in the library panel (was the
 //    other way round).
@@ -567,7 +575,7 @@ function scFrameScript(EQ_BAR_COUNT) {
 // =====================================================================
 // CHROME SIDE (the widget itself)
 // =====================================================================
-const SC_WIDGET_VERSION = "2.1.0";
+const SC_WIDGET_VERSION = "2.1.1";
 
 function scWidgetInit() {
   if (document.getElementById("sc-widget-test")) return;
@@ -913,7 +921,7 @@ function scWidgetInit() {
     #sc-widget-test .sc-card {
       display: flex; flex-direction: column; gap: 9px;
       padding: 9px 10px; border-radius: 10px;
-      background: ${COL_SURFACE_SOFT}; border: 1px solid ${COL_BORDER};
+      background: transparent; border: 1px solid ${COL_BORDER};
     }
     #sc-widget-test .sc-set-row {
       display: flex; align-items: center; justify-content: space-between; gap: 8px;
@@ -953,11 +961,12 @@ function scWidgetInit() {
       height: 22px; padding: 0 10px; border-radius: 11px;
       background: ${COL_SURFACE}; color: ${COL_TEXT_DIM};
       font-size: 10px; font-weight: 600; white-space: nowrap;
+      overflow: hidden; text-overflow: ellipsis; box-sizing: border-box;
     }
     #sc-widget-test .sc-pill:hover { color: ${COL_TEXT}; }
     #sc-widget-test .sc-pill.sc-armed { background: rgba(243, 139, 168, 0.22) !important; color: #f38ba8; }
-    #sc-widget-test .sc-pill-row { display: flex; gap: 6px; }
-    #sc-widget-test .sc-pill-row > .sc-pill { flex: 1; }
+    #sc-widget-test .sc-pill-row { display: flex; flex-wrap: wrap; gap: 6px; }
+    #sc-widget-test .sc-pill-row > .sc-pill { flex: 1 1 88px; min-width: 0; }
     #sc-widget-test .sc-version { text-align: center; font-size: 9px; color: ${COL_TEXT_FAINT}; }
   `;
   widgetDiv.appendChild(styleTag);
@@ -1120,11 +1129,15 @@ function scWidgetInit() {
   // Controls: [fav] [prev] [play] [next] [library]
   const controlsRow = el("div");
   controlsRow.style.cssText = `
-    display: flex; align-items: center; justify-content: center;
-    column-gap: 6px; row-gap: 6px; flex-wrap: wrap; width: 100%;
+    display: flex; align-items: center; justify-content: center; gap: 6px;
   `;
 
-  const favBtn = btn("", 24, "Add to favourites");
+  const secondaryRow = el("div");
+  secondaryRow.style.cssText = `
+    display: flex; align-items: center; justify-content: center; gap: 10px;
+  `;
+
+  const favBtn = btn("", 20, "Add to favourites");
   favBtn.id = "sc-widget-fav";
 
   const prevBtn = btn("", 24, "Previous");
@@ -1150,15 +1163,15 @@ function scWidgetInit() {
   `;
   nextBtn.appendChild(nextIcon);
 
-  const libBtn = btn("", 24, "Recently played & favourites");
+  const libBtn = btn("", 20, "Recently played & favourites");
   libBtn.id = "sc-widget-library";
-  libBtn.appendChild(icon(PATHS.list, { stroke: COL_TEXT, sw: 2.2, size: 12 }));
+  libBtn.appendChild(icon(PATHS.list, { stroke: COL_TEXT, sw: 2.2, size: 11 }));
 
-  controlsRow.appendChild(favBtn);
   controlsRow.appendChild(prevBtn);
   controlsRow.appendChild(playPauseBtn);
   controlsRow.appendChild(nextBtn);
-  controlsRow.appendChild(libBtn);
+  secondaryRow.appendChild(favBtn);
+  secondaryRow.appendChild(libBtn);
 
   fullBody.appendChild(artworkWrapper);
   fullBody.appendChild(titleBlock);
@@ -1166,6 +1179,7 @@ function scWidgetInit() {
   fullBody.appendChild(progressOuter);
   fullBody.appendChild(timeRow);
   fullBody.appendChild(controlsRow);
+  fullBody.appendChild(secondaryRow);
   widgetDiv.appendChild(fullBody);
 
   // =================== MINI VIEW ===================
