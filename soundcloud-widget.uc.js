@@ -7,6 +7,10 @@
 // NOTE: keep this file pure ASCII. The loader reads it as Latin-1, so any
 // raw UTF-8 symbol shows up as garbage. Use \uXXXX escapes in strings.
 //
+// v2.1.4
+//  - Play button lookup no longer falls into related-track tiles; scored
+//    candidate search + full pointer sequence + a dump to the console when
+//    nothing is found.
 // v2.1.3
 //  - Track-page play button lookup rewritten: it's an <a>, not a <button>,
 //    and the player bar's own play button shares its class, so the bar is
@@ -207,57 +211,91 @@ function scFrameScript(EQ_BAR_COUNT) {
     return !!b && (b.classList.contains("playing") || /pause/i.test(b.title || ""));
   }
 
-  // The player bar's own play button ALSO carries .sc-button-play, so
-  // everything inside the bar must be excluded. The big play button on a
-  // track page is usually an <a>, not a <button>, and class names change,
-  // so: try known hero containers first, then any visible play-looking
-  // control outside the bar / track lists, then match by title/aria-label.
-  function isVisibleEl(b) {
-    try { return b.getClientRects().length > 0; } catch (e) { return true; }
+  // Finding the big play button on a track page.
+  // Lessons from the logs: the old lookup fell through to a
+  // DIV.playableTile__playButton (a tile in a "related tracks" list), not
+  // the hero button. So now: tiles, lists, sidebars and the player bar are
+  // all excluded, and the candidate is scored (big, near the top, "play"
+  // in class/title/label). If nothing is found, a dump of every play-ish
+  // element on the page is logged so the selectors can be fixed for real.
+  const BAD_CTX = ".playControls, .playbackSoundBadge, .playControls__elements, " +
+    "[class*='Tile'], [class*='tile'], .soundList, .trackList, .sidebarModule, " +
+    ".l-sidebar-right, .soundBadgeList, .systemPlaylistTrackList, .compactTrackList, " +
+    ".queue, .playbackSoundBadge__queueItemsList, [class*='comment'], [class*='Comment'], " +
+    "[class*='waveform'], [class*='Waveform']";
+  const BAD_CLASS = /playlist|playbackSound|playControls|skipControl|volume|queue|tile|comment|waveform/i;
+  const HERO_CTX = ".fullHero, .fullListenHero, .l-listen-hero, .listenHero, .soundTitle, " +
+    ".listenEngagement, .l-about-top, .listenContent, [class*='Hero'], [class*='hero']";
+
+  function rectOf(b) {
+    try { return b.getBoundingClientRect(); } catch (e) { return { width: 0, height: 0, top: 0 }; }
   }
-  function isBarEl(b) {
+
+  function playCandidate(b, needVisible) {
     try {
-      return !!b.closest(".playControls, .playbackSoundBadge, .playControls__elements") ||
-        b.classList.contains("playControls__play");
-    } catch (e) { return false; }
+      if (b.closest(BAD_CTX)) return null;
+      const cls = String(b.className && b.className.baseVal !== undefined ? b.className.baseVal : b.className || "");
+      if (BAD_CLASS.test(cls)) return null;
+      const title = (b.getAttribute("title") || "") + " " + (b.getAttribute("aria-label") || "");
+      const looksPlay = /play/i.test(cls) || /^\s*play\b/i.test(title);
+      if (!looksPlay) return null;
+      if (/playlist/i.test(title)) return null;
+      const r = rectOf(b);
+      if (needVisible && (r.width < 24 || r.height < 24 || r.width > 220)) return null;
+      let score = r.width * r.height;
+      if (b.closest(HERO_CTX)) score += 100000;
+      if (r.top >= 0 && r.top < 700) score += 5000;
+      if (/sc-button-play/.test(cls)) score += 20000;
+      if (b.tagName === "A" || b.tagName === "BUTTON") score += 2000;
+      return { el: b, score: score };
+    } catch (e) { return null; }
   }
+
   function findHeroPlay() {
     const d = content.document;
-    const containers = [
-      ".fullHero", ".fullListenHero", ".l-listen-hero", ".listenHero",
-      ".soundTitle", ".listenEngagement", ".l-about-top", ".listenContent"
-    ];
-    const inner = "a.sc-button-play, button.sc-button-play, .sc-button-play, " +
-      "[class*='playButton'], [class*='PlayButton']";
-    for (const c of containers) {
-      for (const root of d.querySelectorAll(c)) {
-        for (const b of root.querySelectorAll(inner)) {
-          if (!isBarEl(b) && isVisibleEl(b)) return b;
-        }
+    const sel = "[class*='play' i], [title*='play' i], [aria-label*='play' i]";
+    const all = d.querySelectorAll(sel);
+    for (const needVisible of [true, false]) {
+      let best = null;
+      for (const b of all) {
+        const c = playCandidate(b, needVisible);
+        if (c && (!best || c.score > best.score)) best = c;
       }
-    }
-    for (const b of d.querySelectorAll(inner)) {
-      if (isBarEl(b) || !isVisibleEl(b)) continue;
-      if (b.closest(".soundList, .trackList, .sidebarModule, .l-sidebar-right, .soundBadgeList, .systemPlaylistTrackList")) continue;
-      return b;
-    }
-    for (const b of d.querySelectorAll("a, button, [role='button']")) {
-      if (isBarEl(b) || !isVisibleEl(b)) continue;
-      const label = ((b.getAttribute("title") || "") + " " + (b.getAttribute("aria-label") || "")).trim();
-      if (/^play\b/i.test(label) && !/playlist/i.test(label)) {
-        if (b.closest(".soundList, .trackList, .sidebarModule, .l-sidebar-right")) continue;
-        return b;
-      }
+      if (best) return best.el;
     }
     return null;
   }
 
-  function clickEl(b) {
+  function dumpPlayCandidates() {
+    try {
+      const out = [];
+      for (const b of content.document.querySelectorAll("[class*='play' i], [title*='play' i], [aria-label*='play' i]")) {
+        const r = rectOf(b);
+        out.push(b.tagName + "." + String(b.className).slice(0, 50).replace(/\s+/g, ".") +
+          "|" + (b.getAttribute("title") || b.getAttribute("aria-label") || "") +
+          "|" + Math.round(r.width) + "x" + Math.round(r.height) +
+          (b.closest(BAD_CTX) ? "|BAD" : ""));
+        if (out.length >= 16) break;
+      }
+      log("play-ish elements: " + out.join(" ;; "));
+    } catch (e) { log("dump failed: " + (e && e.message)); }
+  }
+
+  function clickEl(b, full) {
     activateDoc();
     let handle = null;
     try { handle = content.windowUtils.setHandlingUserInput(true); } catch (e) {}
     try {
-      b.dispatchEvent(new content.MouseEvent("click", { bubbles: true, cancelable: true, view: content, button: 0 }));
+      const o = { bubbles: true, cancelable: true, view: content, button: 0 };
+      if (full) {
+        const pd = Object.assign({ pointerId: 1, pointerType: "mouse", isPrimary: true, buttons: 1 }, o);
+        const pu = Object.assign({ pointerId: 1, pointerType: "mouse", isPrimary: true, buttons: 0 }, o);
+        try { b.dispatchEvent(new content.PointerEvent("pointerdown", pd)); } catch (e) {}
+        b.dispatchEvent(new content.MouseEvent("mousedown", Object.assign({ buttons: 1 }, o)));
+        try { b.dispatchEvent(new content.PointerEvent("pointerup", pu)); } catch (e) {}
+        b.dispatchEvent(new content.MouseEvent("mouseup", o));
+      }
+      b.dispatchEvent(new content.MouseEvent("click", o));
     } finally {
       try { if (handle) handle.destruct(); } catch (e) {}
     }
@@ -292,10 +330,11 @@ function scFrameScript(EQ_BAR_COUNT) {
         if (!job.clicked) {
           const b = findHeroPlay();
           if (b) {
-            clickEl(b); job.clicked = true; job.clickedAt = job.tries;
+            clickEl(b, true); job.clicked = true; job.clickedAt = job.tries;
             log("hero play clicked: " + String(b.tagName) + "." + String(b.className).slice(0, 60));
-          } else if (job.tries === 15) {
+          } else if (job.tries === 15 || job.tries === 40) {
             log("hero play button NOT found on " + here);
+            dumpPlayCandidates();
           }
         } else if (job.tries - job.clickedAt > 20) {
           finishJob(job, false); return;
@@ -670,7 +709,7 @@ function scFrameScript(EQ_BAR_COUNT) {
 // =====================================================================
 // CHROME SIDE (the widget itself)
 // =====================================================================
-const SC_WIDGET_VERSION = "2.1.3";
+const SC_WIDGET_VERSION = "2.1.4";
 
 function scWidgetInit() {
   if (document.getElementById("sc-widget-test")) return;
