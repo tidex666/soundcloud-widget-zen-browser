@@ -7,6 +7,10 @@
 // NOTE: keep this file pure ASCII. The loader reads it as Latin-1, so any
 // raw UTF-8 symbol shows up as garbage. Use \uXXXX escapes in strings.
 //
+// v2.1.5
+//  - Play button search only accepts A/BUTTON/DIV/SPAN with a real play class
+//    token (v2.1.4 clicked an embedded <iframe> whose class had "playerVisible").
+//    Dumps the page's play-ish elements if a click doesn't start playback.
 // v2.1.4
 //  - Play button lookup no longer falls into related-track tiles; scored
 //    candidate search + full pointer sequence + a dump to the console when
@@ -233,12 +237,21 @@ function scFrameScript(EQ_BAR_COUNT) {
 
   function playCandidate(b, needVisible) {
     try {
+      // Only real clickable-ish tags. Class substring "play" also matches
+      // things like <iframe class="...playerVisible"> (an embedded widget),
+      // which got clicked in v2.1.4.
+      const tag = b.tagName;
+      if (!/^(A|BUTTON|DIV|SPAN)$/.test(tag)) return null;
       if (b.closest(BAD_CTX)) return null;
       const cls = String(b.className && b.className.baseVal !== undefined ? b.className.baseVal : b.className || "");
       if (BAD_CLASS.test(cls)) return null;
+      const tokens = cls.split(/\s+/).filter(Boolean);
+      const hasPlayTok = tokens.some((t) =>
+        /^(sc-button-play|play|play-?button|play-?icon)$/i.test(t) || /(__|_|-)play(-?button)?$/i.test(t));
       const title = (b.getAttribute("title") || "") + " " + (b.getAttribute("aria-label") || "");
-      const looksPlay = /play/i.test(cls) || /^\s*play\b/i.test(title);
-      if (!looksPlay) return null;
+      const titlePlay = /^\s*play\b/i.test(title) && !/playlist/i.test(title);
+      const isBtnish = tag === "A" || tag === "BUTTON" || b.getAttribute("role") === "button";
+      if (!(hasPlayTok || (titlePlay && isBtnish))) return null;
       if (/playlist/i.test(title)) return null;
       const r = rectOf(b);
       if (needVisible && (r.width < 24 || r.height < 24 || r.width > 220)) return null;
@@ -246,7 +259,7 @@ function scFrameScript(EQ_BAR_COUNT) {
       if (b.closest(HERO_CTX)) score += 100000;
       if (r.top >= 0 && r.top < 700) score += 5000;
       if (/sc-button-play/.test(cls)) score += 20000;
-      if (b.tagName === "A" || b.tagName === "BUTTON") score += 2000;
+      if (isBtnish) score += 2000;
       return { el: b, score: score };
     } catch (e) { return null; }
   }
@@ -331,13 +344,18 @@ function scFrameScript(EQ_BAR_COUNT) {
           const b = findHeroPlay();
           if (b) {
             clickEl(b, true); job.clicked = true; job.clickedAt = job.tries;
-            log("hero play clicked: " + String(b.tagName) + "." + String(b.className).slice(0, 60));
+            log("hero play clicked: " + String(b.tagName) + "." + String(b.className).slice(0, 60) +
+              " (" + Math.round(rectOf(b).width) + "x" + Math.round(rectOf(b).height) + ")");
           } else if (job.tries === 15 || job.tries === 40) {
             log("hero play button NOT found on " + here);
             dumpPlayCandidates();
           }
-        } else if (job.tries - job.clickedAt > 20) {
-          finishJob(job, false); return;
+        } else {
+          if (job.tries - job.clickedAt === 12) {
+            log("clicked but the track is not in the player bar yet");
+            dumpPlayCandidates();
+          }
+          if (job.tries - job.clickedAt > 20) { finishJob(job, false); return; }
         }
       } else if (job.tries === 12 && !job.hardNav) {
         job.hardNav = true;
@@ -709,7 +727,7 @@ function scFrameScript(EQ_BAR_COUNT) {
 // =====================================================================
 // CHROME SIDE (the widget itself)
 // =====================================================================
-const SC_WIDGET_VERSION = "2.1.4";
+const SC_WIDGET_VERSION = "2.1.5";
 
 function scWidgetInit() {
   if (document.getElementById("sc-widget-test")) return;
