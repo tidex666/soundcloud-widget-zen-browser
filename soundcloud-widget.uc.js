@@ -7,6 +7,12 @@
 // NOTE: keep this file pure ASCII. The loader reads it as Latin-1, so any
 // raw UTF-8 symbol shows up as garbage. Use \uXXXX escapes in strings.
 //
+// v2.2.5
+//  - Cover art (full and mini) now has its own rounded corners plus an
+//    isolated clip, so the image can no longer poke out past the frame.
+//  - Widget background is fully transparent: no tint, no darkening, no
+//    inner shading. Only the backdrop blur/saturation, the thin rim and a
+//    soft shadow outside the box remain.
 // v2.2.4
 //  - Minimized/hidden browser window: the audio analyser in the SoundCloud
 //    tab stops analysing and messaging, and the widget stops polling the
@@ -980,7 +986,7 @@ function scFrameScript(EQ_BAR_COUNT) {
 // =====================================================================
 // CHROME SIDE (the widget itself)
 // =====================================================================
-const SC_WIDGET_VERSION = "2.2.4";
+const SC_WIDGET_VERSION = "2.2.5";
 
 function scWidgetInit() {
   if (document.getElementById("sc-widget-test")) return;
@@ -1195,14 +1201,11 @@ function scWidgetInit() {
     padding: 10px 12px;
     box-sizing: border-box;
     -moz-window-dragging: no-drag;
-    background: rgba(20, 20, 24, 0.07);
-    backdrop-filter: blur(14px) saturate(190%) brightness(0.9);
+    background: transparent;
+    backdrop-filter: blur(14px) saturate(160%);
     border: none;
     border-radius: 20px;
-    box-shadow:
-      0 12px 32px -10px rgba(0, 0, 0, 0.28),
-      inset 0 -12px 22px -16px rgba(0, 0, 0, 0.30),
-      inset 0 0 14px rgba(255, 255, 255, 0.025);
+    box-shadow: 0 12px 32px -10px rgba(0, 0, 0, 0.28);
     transition: opacity 0.12s ease;
   `;
 
@@ -1461,14 +1464,14 @@ function scWidgetInit() {
   const artworkWrapper = el("div");
   artworkWrapper.style.cssText = `
     position: relative; width: 56px; height: 56px; border-radius: 12px;
-    overflow: hidden; background-color: ${COL_SURFACE}; flex-shrink: 0;
+    isolation: isolate; overflow: hidden; background-color: ${COL_SURFACE}; flex-shrink: 0;
   `;
   artworkWrapper.classList.add("sc-art");
   const artworkEl = el("div", "sc-cover-click");
   artworkEl.id = "sc-widget-artwork";
   artworkEl.title = "Go to SoundCloud tab";
   artworkEl.style.cssText = `
-    width: 100%; height: 100%; background-size: cover;
+    width: 100%; height: 100%; border-radius: inherit; background-size: cover;
     background-position: center; transition: filter 0.15s ease;
   `;
   artworkWrapper.appendChild(artworkEl);
@@ -1671,14 +1674,14 @@ function scWidgetInit() {
 
   const miniArtWrap = el("div");
   miniArtWrap.style.cssText = `
-    position: relative; width: 28px; height: 28px; border-radius: 8px; overflow: hidden;
+    position: relative; width: 28px; height: 28px; border-radius: 8px; isolation: isolate; overflow: hidden;
     flex-shrink: 0; background-color: ${COL_SURFACE};
   `;
   miniArtWrap.classList.add("sc-art");
   const miniArt = el("div", "sc-cover-click");
   miniArt.title = "Go to SoundCloud tab";
   miniArt.style.cssText = `
-    width: 100%; height: 100%; background-size: cover;
+    width: 100%; height: 100%; border-radius: inherit; background-size: cover;
     background-position: center; transition: filter 0.15s ease;
   `;
   miniArtWrap.appendChild(miniArt);
