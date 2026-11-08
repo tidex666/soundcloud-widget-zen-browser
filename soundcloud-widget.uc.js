@@ -7,6 +7,12 @@
 // NOTE: keep this file pure ASCII. The loader reads it as Latin-1, so any
 // raw UTF-8 symbol shows up as garbage. Use \uXXXX escapes in strings.
 //
+// v2.1.8
+//  - Clicks ONE button only: the exact-title "Play" button (64px) of the track
+//    page iframe whose URL matches the requested track. No more cycling
+//    through candidates (that started other songs / skipped tracks), no
+//    "Play the track on repeat" card, no related-track tiles. Waits longer
+//    on slow connections and retries once.
 // v2.1.7
 //  - Track page content lives in an iframe (webiIframe), not the main
 //    document: the play button search and click now go into iframes too.
@@ -223,59 +229,20 @@ function scFrameScript(EQ_BAR_COUNT) {
   }
 
   // Finding the big play button on a track page.
-  // What the logs showed: the track page's main artwork is a "tile"
-  // (DIV.playableTile__playButton.audibleTile__playButton). v2.1.4/2.1.5
-  // excluded everything with "tile" in its class to avoid related-track
-  // tiles, which also threw out the real one. Now tiles are allowed again
-  // and ranked (big tile / hero area first). Several candidates are kept
-  // and tried one after another until the track shows up in the player bar.
-  const BAD_CTX = ".playControls, .playbackSoundBadge, .playControls__elements, " +
-    ".soundList, .trackList, .sidebarModule, .l-sidebar-right, .soundBadgeList, " +
-    ".systemPlaylistTrackList, .compactTrackList, .queue, " +
-    ".playbackSoundBadge__queueItemsList, [class*='comment'], [class*='Comment'], " +
-    "[class*='waveform'], [class*='Waveform']";
-  const BAD_CLASS = /playlist|playbackSound|playControls|skipControl|volume|queue|comment|waveform/i;
-  const HERO_CTX = ".fullHero, .fullListenHero, .l-listen-hero, .listenHero, .soundTitle, " +
-    ".listenEngagement, .l-about-top, .listenContent, [class*='Hero'], [class*='hero']";
-  const TILE_CTX = "[class*='Tile'], [class*='tile'], [class*='artwork'], [class*='Artwork']";
+  // Real markup (from the logs): the track page is a MUI app inside an
+  // iframe (src /n/<artist>/<track>). The hero button is a 64x64
+  // BUTTON.MuiButton-outlined with title "Play". Things that must NOT be
+  // clicked: "Play the track on repeat!" (a card), the 32x32 "Play" buttons
+  // of related tracks (inside .artwork__play) and 0x0 hidden/stale nodes.
+  // Only ONE button is clicked (no cycling through candidates: that played
+  // other songs and skipped tracks), and the iframe must actually be the
+  // page of the requested track.
+  const BAD_CTX = ".playControls, .playbackSoundBadge, .playControls__elements, .queue";
 
   function rectOf(b) {
     try { return b.getBoundingClientRect(); } catch (e) { return { width: 0, height: 0, top: 0 }; }
   }
 
-  function playCandidate(b, needVisible) {
-    try {
-      // Only real clickable-ish tags (an <iframe class="...playerVisible">
-      // got clicked in v2.1.4).
-      const tag = b.tagName;
-      if (!/^(A|BUTTON|DIV|SPAN)$/.test(tag)) return null;
-      if (b.closest(BAD_CTX)) return null;
-      const cls = String(b.className && b.className.baseVal !== undefined ? b.className.baseVal : b.className || "");
-      if (BAD_CLASS.test(cls)) return null;
-      const tokens = cls.split(/\s+/).filter(Boolean);
-      const hasPlayTok = tokens.some((t) =>
-        /^(sc-button-play|play|play-?button|play-?icon)$/i.test(t) || /(__|_|-)play(-?button)?$/i.test(t));
-      const title = (b.getAttribute("title") || "") + " " + (b.getAttribute("aria-label") || "");
-      const titlePlay = /^\s*play\b/i.test(title) && !/playlist/i.test(title);
-      const isBtnish = tag === "A" || tag === "BUTTON" || b.getAttribute("role") === "button";
-      if (!(hasPlayTok || (titlePlay && isBtnish))) return null;
-      if (/playlist/i.test(title)) return null;
-      const r = rectOf(b);
-      if (needVisible && (r.width < 20 || r.height < 20 || r.width > 400)) return null;
-      let score = Math.min(r.width * r.height, 40000);
-      if (b.closest(HERO_CTX)) score += 100000;
-      const holder = b.closest(TILE_CTX);
-      if (holder && rectOf(holder).width >= 200) score += 60000; // big artwork tile
-      if (r.top >= 0 && r.top < 700) score += 5000;
-      if (/sc-button-play/.test(cls)) score += 20000;
-      if (isBtnish) score += 2000;
-      return { el: b, score: score };
-    } catch (e) { return null; }
-  }
-
-  // The track page content does NOT live in the main document: the dump
-  // showed a full-viewport <iframe class="webiIframe ..."> and nothing else.
-  // So search the main document AND every reachable (nested) iframe.
   function getRoots() {
     const roots = [{ doc: content.document, label: "main" }];
     const seen = [content.document];
@@ -303,28 +270,43 @@ function scFrameScript(EQ_BAR_COUNT) {
     return roots;
   }
 
-  const PLAY_SEL = "[class*='play' i], [title*='play' i], [aria-label*='play' i]";
+  function normPath(x) {
+    let t = String(x || "");
+    try { t = decodeURIComponent(t); } catch (e) {}
+    return t.toLowerCase().replace(/\/+$/, "").replace(/^\/n(?=\/)/, "");
+  }
 
-  // Sorted list (best first), at most 4.
-  function findPlayCandidates() {
-    const roots = getRoots();
-    for (const needVisible of [true, false]) {
-      const list = [];
-      for (const r of roots) {
-        if (!r.doc) continue;
-        let all = [];
-        try { all = r.doc.querySelectorAll(PLAY_SEL); } catch (e) {}
-        for (const b of all) {
-          const c = playCandidate(b, needVisible);
-          if (c) list.push(c);
-        }
-      }
-      if (list.length) {
-        list.sort((a, b) => b.score - a.score);
-        return list.slice(0, 4).map((c) => c.el);
+  function docMatchesPath(d, path) {
+    try {
+      const a = normPath(d.location.pathname);
+      const b = normPath(path);
+      return !!a && !!b && (a === b || a.endsWith(b));
+    } catch (e) { return false; }
+  }
+
+  // loose=true skips the "iframe shows the right track" check (used as a
+  // last resort after waiting a while).
+  function findHeroPlay(path, loose) {
+    let best = null;
+    for (const r of getRoots()) {
+      if (!r.doc) continue;
+      if (r.label !== "main" && !loose && !docMatchesPath(r.doc, path)) continue;
+      let all = [];
+      try { all = r.doc.querySelectorAll("button, a, [role='button']"); } catch (e) {}
+      for (const b of all) {
+        try {
+          const label = ((b.getAttribute("title") || b.getAttribute("aria-label") || "")).trim();
+          if (!/^play$/i.test(label)) continue;          // exact "Play" only
+          if (b.closest(BAD_CTX)) continue;               // player bar
+          if (b.closest("[class*='artwork__play']")) continue; // related-track tiles
+          const rc = rectOf(b);
+          if (rc.width < 40 || rc.height < 40) continue;  // hidden/stale/small
+          const score = rc.width * rc.height + (b.tagName === "BUTTON" ? 1 : 0);
+          if (!best || score > best.score) best = { el: b, score: score };
+        } catch (e) {}
       }
     }
-    return [];
+    return best ? best.el : null;
   }
 
   function describeEl(b) {
@@ -339,16 +321,18 @@ function scFrameScript(EQ_BAR_COUNT) {
       const parts = [];
       for (const r of getRoots()) {
         if (!r.doc) { parts.push("[" + r.label + "]"); continue; }
+        let pth = "";
+        try { pth = r.doc.location.pathname; } catch (e) {}
         const out = [];
         let all = [];
-        try { all = r.doc.querySelectorAll(PLAY_SEL); } catch (e) {}
+        try { all = r.doc.querySelectorAll("[class*='play' i], [title*='play' i], [aria-label*='play' i]"); } catch (e) {}
         for (const b of all) {
           if (b.closest(BAD_CTX)) continue;
-          if (r.label === "main" && b.tagName === "IFRAME") continue;
+          if (b.tagName === "IFRAME") continue;
           out.push(describeEl(b));
-          if (out.length >= 20) break;
+          if (out.length >= 14) break;
         }
-        parts.push("[" + r.label + "] " + (out.length ? out.join(" ;; ") : "none"));
+        parts.push("[" + r.label + " path=" + pth + "] " + (out.length ? out.join(" ;; ") : "none"));
       }
       log("play-ish elements: " + parts.join(" ### "));
     } catch (e) { log("dump failed: " + (e && e.message)); }
@@ -388,14 +372,6 @@ function scFrameScript(EQ_BAR_COUNT) {
     }
   }
 
-  function clickCand(job) {
-    const b = job.cands[job.ci];
-    clickEl(b, true);
-    job.clicked = true;
-    job.clickedAt = job.tries;
-    log("play click " + (job.ci + 1) + "/" + job.cands.length + ": " + describeEl(b));
-  }
-
   function pumpPendingPlay() {
     const job = pendingPlay;
     if (!job) return;
@@ -409,45 +385,49 @@ function scFrameScript(EQ_BAR_COUNT) {
           job.clicked = true;
           job.clickedAt = job.tries;
           dispatchClick(".playControls__play");
-        } else if (job.tries - job.clickedAt > 15) {
+        } else if (job.tries - job.clickedAt > 40) {
           finishJob(job, false); return;
         }
       } else if (here === job.path) {
         if (!job.clicked) {
-          const list = findPlayCandidates();
-          if (list.length) {
-            job.cands = list;
-            job.ci = 0;
-            clickCand(job);
+          // After ~6s stop insisting that the iframe URL matches.
+          const el = findHeroPlay(job.path, job.tries >= 30);
+          if (el) {
+            clickEl(el, true);
+            job.clicked = true;
+            job.clickedAt = job.tries;
+            job.clicks = 1;
+            log("play click: " + describeEl(el));
           } else if (job.tries === 15 || job.tries === 40) {
-            let vis = "?";
-            try { vis = content.document.visibilityState; } catch (e) {}
             let rl = "";
             try { rl = getRoots().map((r) => r.label).join(" | "); } catch (e) {}
-            log("play button NOT found on " + here + " (visibility=" + vis + ") roots: " + rl);
+            log("play button NOT found on " + here + " roots: " + rl);
             dumpPlayCandidates();
           }
         } else {
+          // Clicked once; slow connections need a while for the track to
+          // reach the player bar. Retry exactly once after ~8s, then give up.
           const since = job.tries - job.clickedAt;
-          if (since >= 10) {
-            if (job.cands && job.ci + 1 < job.cands.length) {
-              job.ci++;
-              clickCand(job);   // previous candidate did nothing -> next one
-            } else {
-              if (since === 12) {
-                log("clicked everything, track still not in the player bar");
-                dumpPlayCandidates();
-              }
-              if (since > 20) { finishJob(job, false); return; }
+          if (since === 40 && job.clicks < 2) {
+            const el = findHeroPlay(job.path, true);
+            if (el) {
+              clickEl(el, true);
+              job.clicks = 2;
+              log("play click (retry): " + describeEl(el));
             }
           }
+          if (since > 90) {
+            log("gave up: track never reached the player bar");
+            dumpPlayCandidates();
+            finishJob(job, false); return;
+          }
         }
-      } else if (job.tries === 12 && !job.hardNav) {
+      } else if (job.tries === 40 && !job.hardNav) {  // slow connection: give the router ~8s
         job.hardNav = true;
         content.location.href = job.url;
       }
     } catch (e) {}
-    if (job.tries > 80) { if (pendingPlay === job) pendingPlay = null; return; }
+    if (job.tries > 200) { if (pendingPlay === job) pendingPlay = null; return; }
     if (pendingPlay === job) schedule(pumpPendingPlay, 200);
   }
 
@@ -812,7 +792,7 @@ function scFrameScript(EQ_BAR_COUNT) {
 // =====================================================================
 // CHROME SIDE (the widget itself)
 // =====================================================================
-const SC_WIDGET_VERSION = "2.1.7";
+const SC_WIDGET_VERSION = "2.1.8";
 
 function scWidgetInit() {
   if (document.getElementById("sc-widget-test")) return;
