@@ -7,6 +7,10 @@
 // NOTE: keep this file pure ASCII. The loader reads it as Latin-1, so any
 // raw UTF-8 symbol shows up as garbage. Use \uXXXX escapes in strings.
 //
+// v2.2.7
+//  - Nothing around the clipped cover differs from the glass behind it any
+//    more: no fill under the picture, no hairline ring, and the white glow
+//    only appears while audio is actually playing (none when paused).
 // v2.2.6
 //  - Cover art sits in its own clip layer (clip-path with rounded corners),
 //    because a blurred (eye button) cover was not clipped to the rounded
@@ -992,7 +996,7 @@ function scFrameScript(EQ_BAR_COUNT) {
 // =====================================================================
 // CHROME SIDE (the widget itself)
 // =====================================================================
-const SC_WIDGET_VERSION = "2.2.6";
+const SC_WIDGET_VERSION = "2.2.7";
 
 function scWidgetInit() {
   if (document.getElementById("sc-widget-test")) return;
@@ -1286,12 +1290,6 @@ function scWidgetInit() {
     #sc-widget-test .sc-ellipsis { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
     #sc-widget-test .sc-cover-click { cursor: pointer; }
 
-    /* cover art: just a hairline ring so it sits on the glass */
-    #sc-widget-test .sc-art::after {
-      content: ""; position: absolute; inset: 0; border-radius: inherit; pointer-events: none;
-      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.09);
-    }
-
     /* progress bar: grows on hover and shows a thumb */
     #sc-widget-progress-outer { transition: height 0.12s ease; }
     #sc-widget-progress-outer:hover { height: 6px !important; }
@@ -1470,14 +1468,14 @@ function scWidgetInit() {
   const artworkWrapper = el("div");
   artworkWrapper.style.cssText = `
     position: relative; width: 56px; height: 56px; border-radius: 12px;
-    isolation: isolate; overflow: hidden; background-color: ${COL_SURFACE}; flex-shrink: 0;
+    isolation: isolate; overflow: hidden; flex-shrink: 0;
   `;
   artworkWrapper.classList.add("sc-art");
   const artworkEl = el("div", "sc-cover-click");
   artworkEl.id = "sc-widget-artwork";
   artworkEl.title = "Go to SoundCloud tab";
   artworkEl.style.cssText = `
-    width: 100%; height: 100%; border-radius: inherit; background-size: cover;
+    width: 100%; height: 100%; border-radius: inherit; background-color: ${COL_SURFACE_SOFT}; background-size: cover;
     background-position: center; transition: filter 0.15s ease, transform 0.15s ease;
   `;
   // Firefox does not reliably clip a FILTERED child (the blur mode) to a
@@ -1690,13 +1688,13 @@ function scWidgetInit() {
   const miniArtWrap = el("div");
   miniArtWrap.style.cssText = `
     position: relative; width: 28px; height: 28px; border-radius: 8px; isolation: isolate; overflow: hidden;
-    flex-shrink: 0; background-color: ${COL_SURFACE};
+    flex-shrink: 0;
   `;
   miniArtWrap.classList.add("sc-art");
   const miniArt = el("div", "sc-cover-click");
   miniArt.title = "Go to SoundCloud tab";
   miniArt.style.cssText = `
-    width: 100%; height: 100%; border-radius: inherit; background-size: cover;
+    width: 100%; height: 100%; border-radius: inherit; background-color: ${COL_SURFACE_SOFT}; background-size: cover;
     background-position: center; transition: filter 0.15s ease, transform 0.15s ease;
   `;
   const miniArtClip = el("div");
@@ -2440,8 +2438,10 @@ function scWidgetInit() {
       // rendered for every distinct radius), so it moves in 3px steps and
       // gets reused from cache; the alpha is cheap and stays smooth.
       const rad = 8 + Math.round(displayGlow * 26 / 3) * 3;
-      const alpha = (Math.round((0.07 + displayGlow * 0.26) * 50) / 50).toFixed(2);
-      const shadow = "0 0 " + rad + "px rgba(255, 255, 255, " + alpha + ")";
+      // No permanent haze: with nothing playing the glow is fully off, so
+      // the area around the cover is exactly the glass behind it.
+      const a = Math.round(displayGlow * 0.30 * 50) / 50;
+      const shadow = a < 0.01 ? "none" : "0 0 " + rad + "px rgba(255, 255, 255, " + a.toFixed(2) + ")";
       if (mini) {
         if (shadow !== glowWrittenMini) { glowWrittenMini = shadow; miniArtWrap.style.boxShadow = shadow; }
       } else if (shadow !== glowWrittenFull) {
