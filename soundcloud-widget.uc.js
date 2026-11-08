@@ -7,6 +7,10 @@
 // NOTE: keep this file pure ASCII. The loader reads it as Latin-1, so any
 // raw UTF-8 symbol shows up as garbage. Use \uXXXX escapes in strings.
 //
+// v2.1.6
+//  - Track-page artwork tile (the real play button) is allowed again; several
+//    ranked candidates are tried in turn until the track reaches the player
+//    bar. Console dump now lists page elements only (bar excluded).
 // v2.1.5
 //  - Play button search only accepts A/BUTTON/DIV/SPAN with a real play class
 //    token (v2.1.4 clicked an embedded <iframe> whose class had "playerVisible").
@@ -216,20 +220,21 @@ function scFrameScript(EQ_BAR_COUNT) {
   }
 
   // Finding the big play button on a track page.
-  // Lessons from the logs: the old lookup fell through to a
-  // DIV.playableTile__playButton (a tile in a "related tracks" list), not
-  // the hero button. So now: tiles, lists, sidebars and the player bar are
-  // all excluded, and the candidate is scored (big, near the top, "play"
-  // in class/title/label). If nothing is found, a dump of every play-ish
-  // element on the page is logged so the selectors can be fixed for real.
+  // What the logs showed: the track page's main artwork is a "tile"
+  // (DIV.playableTile__playButton.audibleTile__playButton). v2.1.4/2.1.5
+  // excluded everything with "tile" in its class to avoid related-track
+  // tiles, which also threw out the real one. Now tiles are allowed again
+  // and ranked (big tile / hero area first). Several candidates are kept
+  // and tried one after another until the track shows up in the player bar.
   const BAD_CTX = ".playControls, .playbackSoundBadge, .playControls__elements, " +
-    "[class*='Tile'], [class*='tile'], .soundList, .trackList, .sidebarModule, " +
-    ".l-sidebar-right, .soundBadgeList, .systemPlaylistTrackList, .compactTrackList, " +
-    ".queue, .playbackSoundBadge__queueItemsList, [class*='comment'], [class*='Comment'], " +
+    ".soundList, .trackList, .sidebarModule, .l-sidebar-right, .soundBadgeList, " +
+    ".systemPlaylistTrackList, .compactTrackList, .queue, " +
+    ".playbackSoundBadge__queueItemsList, [class*='comment'], [class*='Comment'], " +
     "[class*='waveform'], [class*='Waveform']";
-  const BAD_CLASS = /playlist|playbackSound|playControls|skipControl|volume|queue|tile|comment|waveform/i;
+  const BAD_CLASS = /playlist|playbackSound|playControls|skipControl|volume|queue|comment|waveform/i;
   const HERO_CTX = ".fullHero, .fullListenHero, .l-listen-hero, .listenHero, .soundTitle, " +
     ".listenEngagement, .l-about-top, .listenContent, [class*='Hero'], [class*='hero']";
+  const TILE_CTX = "[class*='Tile'], [class*='tile'], [class*='artwork'], [class*='Artwork']";
 
   function rectOf(b) {
     try { return b.getBoundingClientRect(); } catch (e) { return { width: 0, height: 0, top: 0 }; }
@@ -237,9 +242,8 @@ function scFrameScript(EQ_BAR_COUNT) {
 
   function playCandidate(b, needVisible) {
     try {
-      // Only real clickable-ish tags. Class substring "play" also matches
-      // things like <iframe class="...playerVisible"> (an embedded widget),
-      // which got clicked in v2.1.4.
+      // Only real clickable-ish tags (an <iframe class="...playerVisible">
+      // got clicked in v2.1.4).
       const tag = b.tagName;
       if (!/^(A|BUTTON|DIV|SPAN)$/.test(tag)) return null;
       if (b.closest(BAD_CTX)) return null;
@@ -254,9 +258,11 @@ function scFrameScript(EQ_BAR_COUNT) {
       if (!(hasPlayTok || (titlePlay && isBtnish))) return null;
       if (/playlist/i.test(title)) return null;
       const r = rectOf(b);
-      if (needVisible && (r.width < 24 || r.height < 24 || r.width > 220)) return null;
-      let score = r.width * r.height;
+      if (needVisible && (r.width < 20 || r.height < 20 || r.width > 400)) return null;
+      let score = Math.min(r.width * r.height, 40000);
       if (b.closest(HERO_CTX)) score += 100000;
+      const holder = b.closest(TILE_CTX);
+      if (holder && rectOf(holder).width >= 200) score += 60000; // big artwork tile
       if (r.top >= 0 && r.top < 700) score += 5000;
       if (/sc-button-play/.test(cls)) score += 20000;
       if (isBtnish) score += 2000;
@@ -264,33 +270,40 @@ function scFrameScript(EQ_BAR_COUNT) {
     } catch (e) { return null; }
   }
 
-  function findHeroPlay() {
+  // Sorted list (best first), at most 4.
+  function findPlayCandidates() {
     const d = content.document;
-    const sel = "[class*='play' i], [title*='play' i], [aria-label*='play' i]";
-    const all = d.querySelectorAll(sel);
+    const all = d.querySelectorAll("[class*='play' i], [title*='play' i], [aria-label*='play' i]");
     for (const needVisible of [true, false]) {
-      let best = null;
+      const list = [];
       for (const b of all) {
         const c = playCandidate(b, needVisible);
-        if (c && (!best || c.score > best.score)) best = c;
+        if (c) list.push(c);
       }
-      if (best) return best.el;
+      if (list.length) {
+        list.sort((a, b) => b.score - a.score);
+        return list.slice(0, 4).map((c) => c.el);
+      }
     }
-    return null;
+    return [];
+  }
+
+  function describeEl(b) {
+    const r = rectOf(b);
+    return b.tagName + "." + String(b.className).slice(0, 50).replace(/\s+/g, ".") +
+      "|" + (b.getAttribute("title") || b.getAttribute("aria-label") || "") +
+      "|" + Math.round(r.width) + "x" + Math.round(r.height);
   }
 
   function dumpPlayCandidates() {
     try {
       const out = [];
       for (const b of content.document.querySelectorAll("[class*='play' i], [title*='play' i], [aria-label*='play' i]")) {
-        const r = rectOf(b);
-        out.push(b.tagName + "." + String(b.className).slice(0, 50).replace(/\s+/g, ".") +
-          "|" + (b.getAttribute("title") || b.getAttribute("aria-label") || "") +
-          "|" + Math.round(r.width) + "x" + Math.round(r.height) +
-          (b.closest(BAD_CTX) ? "|BAD" : ""));
-        if (out.length >= 16) break;
+        if (b.closest(BAD_CTX)) continue;
+        out.push(describeEl(b));
+        if (out.length >= 24) break;
       }
-      log("play-ish elements: " + out.join(" ;; "));
+      log("play-ish elements (page, bar excluded): " + (out.length ? out.join(" ;; ") : "NONE"));
     } catch (e) { log("dump failed: " + (e && e.message)); }
   }
 
@@ -323,6 +336,14 @@ function scFrameScript(EQ_BAR_COUNT) {
     }
   }
 
+  function clickCand(job) {
+    const b = job.cands[job.ci];
+    clickEl(b, true);
+    job.clicked = true;
+    job.clickedAt = job.tries;
+    log("play click " + (job.ci + 1) + "/" + job.cands.length + ": " + describeEl(b));
+  }
+
   function pumpPendingPlay() {
     const job = pendingPlay;
     if (!job) return;
@@ -341,21 +362,31 @@ function scFrameScript(EQ_BAR_COUNT) {
         }
       } else if (here === job.path) {
         if (!job.clicked) {
-          const b = findHeroPlay();
-          if (b) {
-            clickEl(b, true); job.clicked = true; job.clickedAt = job.tries;
-            log("hero play clicked: " + String(b.tagName) + "." + String(b.className).slice(0, 60) +
-              " (" + Math.round(rectOf(b).width) + "x" + Math.round(rectOf(b).height) + ")");
+          const list = findPlayCandidates();
+          if (list.length) {
+            job.cands = list;
+            job.ci = 0;
+            clickCand(job);
           } else if (job.tries === 15 || job.tries === 40) {
-            log("hero play button NOT found on " + here);
+            let vis = "?";
+            try { vis = content.document.visibilityState; } catch (e) {}
+            log("play button NOT found on " + here + " (visibility=" + vis + ")");
             dumpPlayCandidates();
           }
         } else {
-          if (job.tries - job.clickedAt === 12) {
-            log("clicked but the track is not in the player bar yet");
-            dumpPlayCandidates();
+          const since = job.tries - job.clickedAt;
+          if (since >= 10) {
+            if (job.cands && job.ci + 1 < job.cands.length) {
+              job.ci++;
+              clickCand(job);   // previous candidate did nothing -> next one
+            } else {
+              if (since === 12) {
+                log("clicked everything, track still not in the player bar");
+                dumpPlayCandidates();
+              }
+              if (since > 20) { finishJob(job, false); return; }
+            }
           }
-          if (job.tries - job.clickedAt > 20) { finishJob(job, false); return; }
         }
       } else if (job.tries === 12 && !job.hardNav) {
         job.hardNav = true;
@@ -727,7 +758,7 @@ function scFrameScript(EQ_BAR_COUNT) {
 // =====================================================================
 // CHROME SIDE (the widget itself)
 // =====================================================================
-const SC_WIDGET_VERSION = "2.1.5";
+const SC_WIDGET_VERSION = "2.1.6";
 
 function scWidgetInit() {
   if (document.getElementById("sc-widget-test")) return;
