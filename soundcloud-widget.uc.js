@@ -7,6 +7,11 @@
 // NOTE: keep this file pure ASCII. The loader reads it as Latin-1, so any
 // raw UTF-8 symbol shows up as garbage. Use \uXXXX escapes in strings.
 //
+// v2.2.8
+//  - Cover glow is now a blurred copy of the cover behind it (the colours
+//    of the art) instead of a white box-shadow halo. The blur is rendered
+//    once per cover and the music only drives its opacity, so it is
+//    cheaper than the old shadow. Off when paused or when disabled.
 // v2.2.7
 //  - Nothing around the clipped cover differs from the glass behind it any
 //    more: no fill under the picture, no hairline ring, and the white glow
@@ -996,7 +1001,7 @@ function scFrameScript(EQ_BAR_COUNT) {
 // =====================================================================
 // CHROME SIDE (the widget itself)
 // =====================================================================
-const SC_WIDGET_VERSION = "2.2.7";
+const SC_WIDGET_VERSION = "2.2.8";
 
 function scWidgetInit() {
   if (document.getElementById("sc-widget-test")) return;
@@ -1468,7 +1473,7 @@ function scWidgetInit() {
   const artworkWrapper = el("div");
   artworkWrapper.style.cssText = `
     position: relative; width: 56px; height: 56px; border-radius: 12px;
-    isolation: isolate; overflow: hidden; flex-shrink: 0;
+    isolation: isolate; flex-shrink: 0;
   `;
   artworkWrapper.classList.add("sc-art");
   const artworkEl = el("div", "sc-cover-click");
@@ -1480,7 +1485,7 @@ function scWidgetInit() {
   `;
   // Firefox does not reliably clip a FILTERED child (the blur mode) to a
   // rounded parent, so the picture lives in its own layer with a clip-path.
-  // The glow box-shadow stays on the wrapper, outside the clip.
+  // The wrapper itself does not clip, so the glow layer below can spill out.
   const artClip = el("div");
   artClip.style.cssText = `
     position: absolute; inset: 0; border-radius: 12px; overflow: hidden;
@@ -1488,6 +1493,17 @@ function scWidgetInit() {
   `;
   artClip.appendChild(artworkEl);
   artworkWrapper.appendChild(artClip);
+
+  // Cover glow: a blurred copy of the cover sitting behind it, so the glow
+  // takes the colours of the art instead of being a white halo. The blur is
+  // rendered once per cover; the audio only changes the opacity (cheap).
+  const glowEl = el("div");
+  glowEl.style.cssText = `
+    position: absolute; inset: -3px; border-radius: 14px; z-index: -1; pointer-events: none;
+    background-size: cover; background-position: center;
+    filter: blur(11px); opacity: 0; will-change: opacity;
+  `;
+  artworkWrapper.insertBefore(glowEl, artClip);
 
   function buildEyeSvg(closed) {
     const svg = document.createElementNS(SVG_NS, "svg");
@@ -1687,7 +1703,7 @@ function scWidgetInit() {
 
   const miniArtWrap = el("div");
   miniArtWrap.style.cssText = `
-    position: relative; width: 28px; height: 28px; border-radius: 8px; isolation: isolate; overflow: hidden;
+    position: relative; width: 28px; height: 28px; border-radius: 8px; isolation: isolate;
     flex-shrink: 0;
   `;
   miniArtWrap.classList.add("sc-art");
@@ -1704,6 +1720,14 @@ function scWidgetInit() {
   `;
   miniArtClip.appendChild(miniArt);
   miniArtWrap.appendChild(miniArtClip);
+
+  const miniGlowEl = el("div");
+  miniGlowEl.style.cssText = `
+    position: absolute; inset: -2px; border-radius: 10px; z-index: -1; pointer-events: none;
+    background-size: cover; background-position: center;
+    filter: blur(6px); opacity: 0; will-change: opacity;
+  `;
+  miniArtWrap.insertBefore(miniGlowEl, miniArtClip);
 
   const miniText = el("div");
   miniText.style.cssText = `flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px;`;
@@ -1973,8 +1997,8 @@ function scWidgetInit() {
   function applyVisualSettings() {
     widgetDiv.classList.toggle("sc-no-eq", !settings.showEq);
     if (!settings.glow) {
-      artworkWrapper.style.boxShadow = "none";
-      miniArtWrap.style.boxShadow = "none";
+      glowEl.style.opacity = "0";
+      miniGlowEl.style.opacity = "0";
       glowWrittenFull = "";
       glowWrittenMini = "";
     }
@@ -2281,6 +2305,8 @@ function scWidgetInit() {
       lastArtworkUrl = data.artworkUrl;
       setArt(artworkEl, data.artworkUrl);
       setArt(miniArt, data.artworkUrl);
+      setArt(glowEl, data.artworkUrl);
+      setArt(miniGlowEl, data.artworkUrl);
     }
 
     const t = cleanTrackTitle(data.trackTitle) || "";
@@ -2434,19 +2460,15 @@ function scWidgetInit() {
     displayGlow += (glowTarget - displayGlow) * kGlow;
 
     if (settings.glow) {
-      // The blur radius is the expensive part (a new blur has to be
-      // rendered for every distinct radius), so it moves in 3px steps and
-      // gets reused from cache; the alpha is cheap and stays smooth.
-      const rad = 8 + Math.round(displayGlow * 26 / 3) * 3;
-      // No permanent haze: with nothing playing the glow is fully off, so
-      // the area around the cover is exactly the glass behind it.
-      const a = Math.round(displayGlow * 0.30 * 50) / 50;
-      const shadow = a < 0.01 ? "none" : "0 0 " + rad + "px rgba(255, 255, 255, " + a.toFixed(2) + ")";
+      // The glow is a blurred copy of the cover (blurred once, when the art
+      // changes); only its opacity follows the music, which is cheap. Fully
+      // off when nothing plays, so the glass around the cover stays clean.
+      const o = (Math.round(Math.min(1, displayGlow * 0.85) * 40) / 40).toFixed(2);
       if (mini) {
-        if (shadow !== glowWrittenMini) { glowWrittenMini = shadow; miniArtWrap.style.boxShadow = shadow; }
-      } else if (shadow !== glowWrittenFull) {
-        glowWrittenFull = shadow;
-        artworkWrapper.style.boxShadow = shadow;
+        if (o !== glowWrittenMini) { glowWrittenMini = o; miniGlowEl.style.opacity = o; }
+      } else if (o !== glowWrittenFull) {
+        glowWrittenFull = o;
+        glowEl.style.opacity = o;
       }
     }
 
