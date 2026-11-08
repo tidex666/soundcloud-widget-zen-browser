@@ -14,4 +14,6 @@
 
 With all animations enabled it takes about 5% of CPU on an i5-12400F, and 0% on a minimized browser.
 
-Recommend using it with **Mica For Everyone**
+Recommended:
+1. using it with **Mica For Everyone**
+2. about:config → search for "zen.mediacontrols.enabled" → set it to false → about:support → restart startup cache (this turnes off default zen browser media player)
