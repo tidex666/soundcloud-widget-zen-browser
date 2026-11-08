@@ -7,6 +7,9 @@
 // NOTE: keep this file pure ASCII. The loader reads it as Latin-1, so any
 // raw UTF-8 symbol shows up as garbage. Use \uXXXX escapes in strings.
 //
+// v2.1.7
+//  - Track page content lives in an iframe (webiIframe), not the main
+//    document: the play button search and click now go into iframes too.
 // v2.1.6
 //  - Track-page artwork tile (the real play button) is allowed again; several
 //    ranked candidates are tried in turn until the track reaches the player
@@ -270,15 +273,51 @@ function scFrameScript(EQ_BAR_COUNT) {
     } catch (e) { return null; }
   }
 
+  // The track page content does NOT live in the main document: the dump
+  // showed a full-viewport <iframe class="webiIframe ..."> and nothing else.
+  // So search the main document AND every reachable (nested) iframe.
+  function getRoots() {
+    const roots = [{ doc: content.document, label: "main" }];
+    const seen = [content.document];
+    const walk = (doc, depth) => {
+      if (depth > 2) return;
+      let frames = [];
+      try { frames = doc.querySelectorAll("iframe, frame"); } catch (e) {}
+      for (const f of frames) {
+        let d = null;
+        try { d = f.contentDocument; } catch (e) {}
+        let src = "";
+        try { src = String(f.src || f.getAttribute("src") || "").slice(0, 70); } catch (e) {}
+        if (d) {
+          if (seen.indexOf(d) === -1) {
+            seen.push(d);
+            roots.push({ doc: d, label: "iframe " + src });
+            walk(d, depth + 1);
+          }
+        } else {
+          roots.push({ doc: null, label: "iframe-NO-ACCESS " + src });
+        }
+      }
+    };
+    try { walk(content.document, 0); } catch (e) {}
+    return roots;
+  }
+
+  const PLAY_SEL = "[class*='play' i], [title*='play' i], [aria-label*='play' i]";
+
   // Sorted list (best first), at most 4.
   function findPlayCandidates() {
-    const d = content.document;
-    const all = d.querySelectorAll("[class*='play' i], [title*='play' i], [aria-label*='play' i]");
+    const roots = getRoots();
     for (const needVisible of [true, false]) {
       const list = [];
-      for (const b of all) {
-        const c = playCandidate(b, needVisible);
-        if (c) list.push(c);
+      for (const r of roots) {
+        if (!r.doc) continue;
+        let all = [];
+        try { all = r.doc.querySelectorAll(PLAY_SEL); } catch (e) {}
+        for (const b of all) {
+          const c = playCandidate(b, needVisible);
+          if (c) list.push(c);
+        }
       }
       if (list.length) {
         list.sort((a, b) => b.score - a.score);
@@ -297,31 +336,44 @@ function scFrameScript(EQ_BAR_COUNT) {
 
   function dumpPlayCandidates() {
     try {
-      const out = [];
-      for (const b of content.document.querySelectorAll("[class*='play' i], [title*='play' i], [aria-label*='play' i]")) {
-        if (b.closest(BAD_CTX)) continue;
-        out.push(describeEl(b));
-        if (out.length >= 24) break;
+      const parts = [];
+      for (const r of getRoots()) {
+        if (!r.doc) { parts.push("[" + r.label + "]"); continue; }
+        const out = [];
+        let all = [];
+        try { all = r.doc.querySelectorAll(PLAY_SEL); } catch (e) {}
+        for (const b of all) {
+          if (b.closest(BAD_CTX)) continue;
+          if (r.label === "main" && b.tagName === "IFRAME") continue;
+          out.push(describeEl(b));
+          if (out.length >= 20) break;
+        }
+        parts.push("[" + r.label + "] " + (out.length ? out.join(" ;; ") : "none"));
       }
-      log("play-ish elements (page, bar excluded): " + (out.length ? out.join(" ;; ") : "NONE"));
+      log("play-ish elements: " + parts.join(" ### "));
     } catch (e) { log("dump failed: " + (e && e.message)); }
   }
 
   function clickEl(b, full) {
+    // Elements inside an iframe need events built by THEIR window and the
+    // gesture marked on THEIR document.
+    let win = content;
+    try { win = (b.ownerDocument && b.ownerDocument.defaultView) || content; } catch (e) {}
+    try { b.ownerDocument.notifyUserGestureActivation(); } catch (e) {}
     activateDoc();
     let handle = null;
     try { handle = content.windowUtils.setHandlingUserInput(true); } catch (e) {}
     try {
-      const o = { bubbles: true, cancelable: true, view: content, button: 0 };
+      const o = { bubbles: true, cancelable: true, view: win, button: 0 };
       if (full) {
         const pd = Object.assign({ pointerId: 1, pointerType: "mouse", isPrimary: true, buttons: 1 }, o);
         const pu = Object.assign({ pointerId: 1, pointerType: "mouse", isPrimary: true, buttons: 0 }, o);
-        try { b.dispatchEvent(new content.PointerEvent("pointerdown", pd)); } catch (e) {}
-        b.dispatchEvent(new content.MouseEvent("mousedown", Object.assign({ buttons: 1 }, o)));
-        try { b.dispatchEvent(new content.PointerEvent("pointerup", pu)); } catch (e) {}
-        b.dispatchEvent(new content.MouseEvent("mouseup", o));
+        try { b.dispatchEvent(new win.PointerEvent("pointerdown", pd)); } catch (e) {}
+        b.dispatchEvent(new win.MouseEvent("mousedown", Object.assign({ buttons: 1 }, o)));
+        try { b.dispatchEvent(new win.PointerEvent("pointerup", pu)); } catch (e) {}
+        b.dispatchEvent(new win.MouseEvent("mouseup", o));
       }
-      b.dispatchEvent(new content.MouseEvent("click", o));
+      b.dispatchEvent(new win.MouseEvent("click", o));
     } finally {
       try { if (handle) handle.destruct(); } catch (e) {}
     }
@@ -370,7 +422,9 @@ function scFrameScript(EQ_BAR_COUNT) {
           } else if (job.tries === 15 || job.tries === 40) {
             let vis = "?";
             try { vis = content.document.visibilityState; } catch (e) {}
-            log("play button NOT found on " + here + " (visibility=" + vis + ")");
+            let rl = "";
+            try { rl = getRoots().map((r) => r.label).join(" | "); } catch (e) {}
+            log("play button NOT found on " + here + " (visibility=" + vis + ") roots: " + rl);
             dumpPlayCandidates();
           }
         } else {
@@ -758,7 +812,7 @@ function scFrameScript(EQ_BAR_COUNT) {
 // =====================================================================
 // CHROME SIDE (the widget itself)
 // =====================================================================
-const SC_WIDGET_VERSION = "2.1.6";
+const SC_WIDGET_VERSION = "2.1.7";
 
 function scWidgetInit() {
   if (document.getElementById("sc-widget-test")) return;
