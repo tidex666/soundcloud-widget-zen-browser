@@ -7,6 +7,10 @@
 // NOTE: keep this file pure ASCII. The loader reads it as Latin-1, so any
 // raw UTF-8 symbol shows up as garbage. Use \uXXXX escapes in strings.
 //
+// v2.2.4
+//  - Minimized/hidden browser window: the audio analyser in the SoundCloud
+//    tab stops analysing and messaging, and the widget stops polling the
+//    tab. Both resume as soon as the window is visible again.
 // v2.2.3
 //  - Rim highlight cut way down and made nearly uniform (a hair brighter
 //    on the corners), glass made more see-through (7% tint, smaller blur,
@@ -911,12 +915,20 @@ function scFrameScript(EQ_BAR_COUNT) {
     try { return content.setTimeout(f, ms); } catch (e) { return 0; }
   };
 
+  // The browser window is minimized/hidden (reported by the chrome side):
+  // nothing is drawn, so skip the analysis and stop messaging entirely.
+  let paused = false;
+  addMessageListener("SCWidget:Visibility", function (msg) {
+    paused = !!(msg.data && msg.data.hidden);
+  });
+
   let tick = 0;
   let wasSilent = false;
   function frame() {
     let next = 500;
     try {
       if (!content) return; // tab is gone -> stop the loop
+      if (paused) { schedule(frame, 500); return; }
       tick++;
       if (isSoundCloud(content)) {
         if (tick % 5 === 0) {
@@ -968,7 +980,7 @@ function scFrameScript(EQ_BAR_COUNT) {
 // =====================================================================
 // CHROME SIDE (the widget itself)
 // =====================================================================
-const SC_WIDGET_VERSION = "2.2.3";
+const SC_WIDGET_VERSION = "2.2.4";
 
 function scWidgetInit() {
   if (document.getElementById("sc-widget-test")) return;
@@ -2441,7 +2453,23 @@ function scWidgetInit() {
     mm.sendAsyncMessage(messageName, payload);
   }
 
+  // Minimized / hidden window: stop polling the tab and tell the frame
+  // scripts to stop analysing audio. Everything resumes when it is back.
+  let windowHidden = false;
+  function syncWindowHidden() {
+    let hidden = false;
+    try { hidden = window.windowState === window.STATE_MINIMIZED || !!document.hidden; } catch (e) {}
+    if (hidden === windowHidden) return;
+    windowHidden = hidden;
+    try { window.messageManager.broadcastAsyncMessage("SCWidget:Visibility", { hidden: hidden }); } catch (e) {}
+    if (!hidden) {
+      eqPrevTime = 0;
+      pollInfo();
+    }
+  }
+
   function pollInfo() {
+    if (windowHidden) return;
     if (!widgetDiv.isConnected) mountWidget();
     if (!findSoundCloudTab()) {
       hideWidget();
@@ -2613,7 +2641,11 @@ function scWidgetInit() {
     } catch (e) {}
   });
   gBrowser.tabContainer.addEventListener("TabClose", () => setTimeout(pollInfo, 100));
-  setInterval(pollInfo, 1000);
+  // The interval also re-checks the window state, so it can never get stuck
+  // in "hidden" even if an event is missed.
+  setInterval(() => { syncWindowHidden(); pollInfo(); }, 1000);
+  window.addEventListener("sizemodechange", syncWindowHidden);
+  document.addEventListener("visibilitychange", syncWindowHidden);
 
   // Controls
   function togglePlay() {
