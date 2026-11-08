@@ -7,6 +7,11 @@
 // NOTE: keep this file pure ASCII. The loader reads it as Latin-1, so any
 // raw UTF-8 symbol shows up as garbage. Use \uXXXX escapes in strings.
 //
+// v2.2.2
+//  - Glass rework: much more transparent surface (light tint + blur only),
+//    1px bevel rim instead of border + heavy shadows, flat faint-fill
+//    controls, grouped settings cards, softer cover glow, no inner
+//    highlights on every element. Still static CSS only (same CPU use).
 // v2.2.1
 //  - Visual polish, same CPU cost (static CSS only, no new animated
 //    filters or extra backdrop blurs): subtle liquid-glass surface with a
@@ -958,7 +963,7 @@ function scFrameScript(EQ_BAR_COUNT) {
 // =====================================================================
 // CHROME SIDE (the widget itself)
 // =====================================================================
-const SC_WIDGET_VERSION = "2.2.1";
+const SC_WIDGET_VERSION = "2.2.2";
 
 function scWidgetInit() {
   if (document.getElementById("sc-widget-test")) return;
@@ -969,13 +974,15 @@ function scWidgetInit() {
   // into any mica/acrylic sidebar theme instead of fighting it.
   const COL_BG = "#18181b";
   const COL_TEXT = "#f4f4f5";
-  const COL_SELECTION = "rgba(255, 255, 255, 0.16)";
+  // Tuned for a very transparent background: text a bit brighter, fills a
+  // bit stronger so controls still read over a busy wallpaper.
+  const COL_SELECTION = "rgba(255, 255, 255, 0.14)";
   const COL_SURFACE = "rgba(255, 255, 255, 0.08)";
-  const COL_SURFACE_SOFT = "rgba(255, 255, 255, 0.045)";
-  const COL_BORDER = "rgba(255, 255, 255, 0.10)";
-  const COL_TEXT_DIM = "rgba(255, 255, 255, 0.62)";
-  const COL_TEXT_FAINT = "rgba(255, 255, 255, 0.38)";
-  const COL_TRACK = "rgba(255, 255, 255, 0.16)";
+  const COL_SURFACE_SOFT = "rgba(255, 255, 255, 0.05)";
+  const COL_BORDER = "rgba(255, 255, 255, 0.12)";
+  const COL_TEXT_DIM = "rgba(255, 255, 255, 0.74)";
+  const COL_TEXT_FAINT = "rgba(255, 255, 255, 0.50)";
+  const COL_TRACK = "rgba(255, 255, 255, 0.22)";
 
   const EQ_BAR_COUNT = 14;
   const MINI_BAR_COUNT = 4;
@@ -1171,18 +1178,13 @@ function scWidgetInit() {
     padding: 10px 12px;
     box-sizing: border-box;
     -moz-window-dragging: no-drag;
-    background:
-      linear-gradient(180deg, rgba(255, 255, 255, 0.10) 0%, rgba(255, 255, 255, 0.025) 38%, rgba(255, 255, 255, 0) 100%),
-      rgba(24, 24, 27, 0.36);
-    backdrop-filter: blur(22px) saturate(160%);
-    border: 1px solid rgba(255, 255, 255, 0.09);
-    border-top-color: rgba(255, 255, 255, 0.20);
-    border-radius: 18px;
+    background: rgba(20, 20, 24, 0.12);
+    backdrop-filter: blur(18px) saturate(175%) brightness(0.92);
+    border: none;
+    border-radius: 20px;
     box-shadow:
-      0 8px 24px rgba(0, 0, 0, 0.22),
-      0 1px 3px rgba(0, 0, 0, 0.18),
-      inset 0 1px 0 rgba(255, 255, 255, 0.10),
-      inset 0 -1px 0 rgba(0, 0, 0, 0.10);
+      0 12px 32px -10px rgba(0, 0, 0, 0.30),
+      inset 0 0 16px rgba(255, 255, 255, 0.04);
     transition: opacity 0.12s ease;
   `;
 
@@ -1190,10 +1192,19 @@ function scWidgetInit() {
   styleTag.textContent = `
     #sc-widget-test {
       font-family: system-ui, -apple-system, sans-serif; color: ${COL_TEXT}; font-size: 11px;
-      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.22);
-      animation: sc-in 0.28s ease backwards;
+      text-shadow: 0 1px 3px rgba(0, 0, 0, 0.32);
+      animation: sc-in 0.25s ease backwards;
     }
-    @keyframes sc-in { from { opacity: 0; transform: translateY(6px); } }
+    @keyframes sc-in { from { opacity: 0; transform: translateY(4px); } }
+    /* Glass rim: a 1px ring that is bright at the top-left and bottom-right,
+       like light catching a bevelled edge. Static, so no per-frame cost. */
+    #sc-widget-test::before {
+      content: ""; position: absolute; inset: 0; padding: 1px; box-sizing: border-box;
+      border-radius: inherit; pointer-events: none;
+      background: linear-gradient(145deg, rgba(255, 255, 255, 0.50) 0%, rgba(255, 255, 255, 0.10) 26%, rgba(255, 255, 255, 0.03) 55%, rgba(255, 255, 255, 0.20) 100%);
+      mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+      mask-composite: exclude;
+    }
     #sc-widget-test *::selection { background-color: ${COL_SELECTION}; color: ${COL_TEXT}; }
     #sc-widget-test button {
       appearance: none; border: none; margin: 0; padding: 0;
@@ -1202,24 +1213,22 @@ function scWidgetInit() {
     }
     #sc-widget-test button:hover { background-color: ${COL_SELECTION} !important; }
     #sc-widget-test button:active { transform: scale(0.94); }
+    /* flat, faint-fill controls: no shadows, no bevels */
     #sc-widget-test .sc-btn {
       display: flex; align-items: center; justify-content: center;
-      border-radius: 50%; flex-shrink: 0; background-color: ${COL_SURFACE};
-      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12), 0 1px 2px rgba(0, 0, 0, 0.14);
+      border-radius: 50%; flex-shrink: 0; background-color: ${COL_SURFACE_SOFT};
     }
-    #sc-widget-test .sc-btn.sc-inv {
-      background-color: ${COL_TEXT};
-      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.28), inset 0 -1px 1px rgba(0, 0, 0, 0.10), inset 0 1px 0 rgba(255, 255, 255, 0.9);
-    }
+    #sc-widget-test .sc-btn.sc-inv { background-color: ${COL_TEXT}; }
     /* solid buttons stay solid on hover (the dark icon needs the contrast) */
-    #sc-widget-test .sc-btn.sc-inv:hover { background-color: #fff !important; transform: scale(1.06); }
-    #sc-widget-test .sc-btn.sc-inv:active { transform: scale(0.94); }    #sc-widget-test .sc-corner { position: absolute; top: 6px; z-index: 2; opacity: 0.35; }
+    #sc-widget-test .sc-btn.sc-inv:hover { background-color: #fff !important; transform: scale(1.05); }
+    #sc-widget-test .sc-btn.sc-inv:active { transform: scale(0.94); }
+    #sc-widget-test .sc-corner { position: absolute; top: 7px; z-index: 2; opacity: 0.4; background-color: transparent; }
     #sc-widget-test:hover .sc-corner { opacity: 1; }
     #sc-widget-test .sc-btn.sc-disabled { opacity: 0.35; pointer-events: none; }
 
     /* ---- views ---- */
     #sc-widget-test.sc-narrow { display: none !important; }
-    #sc-widget-test.sc-min { padding: 6px 8px !important; border-radius: 12px !important; }
+    #sc-widget-test.sc-min { padding: 6px 8px !important; border-radius: 16px !important; }
     #sc-widget-test.sc-min #sc-full,
     #sc-widget-test:not(.sc-min) #sc-mini,
     #sc-widget-test.sc-min .sc-corner,
@@ -1250,21 +1259,20 @@ function scWidgetInit() {
     #sc-widget-test .sc-ellipsis { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
     #sc-widget-test .sc-cover-click { cursor: pointer; }
 
-    /* cover art: soft inner ring + diagonal sheen (static, no extra cost) */
+    /* cover art: just a hairline ring so it sits on the glass */
     #sc-widget-test .sc-art::after {
       content: ""; position: absolute; inset: 0; border-radius: inherit; pointer-events: none;
-      background: linear-gradient(135deg, rgba(255, 255, 255, 0.16) 0%, rgba(255, 255, 255, 0) 42%);
-      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.14);
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12);
     }
 
     /* progress bar: grows on hover and shows a thumb */
-    #sc-widget-progress-outer { transition: height 0.12s ease; box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.18); }
+    #sc-widget-progress-outer { transition: height 0.12s ease; }
     #sc-widget-progress-outer:hover { height: 6px !important; }
     #sc-widget-progress-outer > div { position: relative; }
     #sc-widget-progress-outer > div::after {
       content: ""; position: absolute; right: -5px; top: 50%; width: 10px; height: 10px;
       margin-top: -5px; border-radius: 50%; background: ${COL_TEXT};
-      box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
       opacity: 0; transform: scale(0.6); transition: opacity 0.12s ease, transform 0.12s ease;
     }
     #sc-widget-progress-outer:hover > div::after { opacity: 1; transform: scale(1); }
@@ -1281,16 +1289,15 @@ function scWidgetInit() {
 
     #sc-widget-test .sc-seg {
       display: flex; justify-self: center; padding: 2px; gap: 2px;
-      border-radius: 11px; background: ${COL_SURFACE};
-      box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.18), inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+      border-radius: 11px; background: ${COL_SURFACE_SOFT};
     }
     #sc-widget-test .sc-seg > button {
       height: 18px; padding: 0 9px; border-radius: 9px;
       font-size: 10px; font-weight: 600; color: ${COL_TEXT_DIM}; background: transparent;
       white-space: nowrap;
     }
-    #sc-widget-test .sc-seg > button.sc-active { background: ${COL_TEXT}; color: ${COL_BG}; text-shadow: none; box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3); }
-    #sc-widget-test .sc-seg > button.sc-active:hover { color: ${COL_TEXT}; }
+    #sc-widget-test .sc-seg > button.sc-active { background: rgba(255, 255, 255, 0.20); color: ${COL_TEXT}; }
+    #sc-widget-test .sc-seg > button.sc-active:hover { background-color: rgba(255, 255, 255, 0.25) !important; }
 
     #sc-widget-test .sc-list {
       display: flex; flex-direction: column; gap: 2px;
@@ -1300,13 +1307,12 @@ function scWidgetInit() {
     }
     #sc-widget-test .sc-row {
       display: flex; align-items: center; gap: 8px; min-width: 0;
-      padding: 4px 5px; border-radius: 11px; cursor: pointer;
-      transition: background-color 0.12s ease, box-shadow 0.12s ease;
+      padding: 4px 5px; border-radius: 10px; cursor: pointer;
+      transition: background-color 0.12s ease;
     }
-    #sc-widget-test .sc-row:hover { background: ${COL_SURFACE}; box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.07); }
+    #sc-widget-test .sc-row:hover { background: ${COL_SURFACE}; }
     #sc-widget-test .sc-row-art {
       position: relative; width: 30px; height: 30px; border-radius: 8px; flex-shrink: 0;
-      box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
       background-color: ${COL_SURFACE}; background-size: cover; background-position: center;
       overflow: hidden;
     }
@@ -1347,9 +1353,8 @@ function scWidgetInit() {
     /* ---- settings ---- */
     #sc-widget-test .sc-card {
       display: flex; flex-direction: column; gap: 9px;
-      padding: 9px 10px; border-radius: 13px;
-      background: transparent; border: 1px solid ${COL_BORDER};
-      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+      padding: 10px 12px; border-radius: 14px;
+      background: ${COL_SURFACE_SOFT};
     }
     #sc-widget-test .sc-set-row {
       display: flex; align-items: center; justify-content: space-between; gap: 8px;
@@ -1379,7 +1384,7 @@ function scWidgetInit() {
     #sc-widget-test .sc-slider-fill { height: 100%; border-radius: 2px; background: ${COL_TEXT}; }
     #sc-widget-test .sc-slider-thumb {
       position: absolute; top: 1px; width: 10px; height: 10px; margin-left: -5px;
-      border-radius: 50%; background: ${COL_TEXT}; box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4), 0 0 0 0.5px rgba(0, 0, 0, 0.12);
+      border-radius: 50%; background: ${COL_TEXT}; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
       transition: transform 0.1s ease;
     }
     #sc-widget-test .sc-slider:hover .sc-slider-thumb,
@@ -1404,10 +1409,9 @@ function scWidgetInit() {
       background: ${COL_SURFACE}; color: ${COL_TEXT_DIM};
       font-size: 10px; font-weight: 600; white-space: nowrap;
       overflow: hidden; text-overflow: ellipsis; box-sizing: border-box;
-      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.10), 0 1px 2px rgba(0, 0, 0, 0.14);
     }
     #sc-widget-test .sc-pill:hover { color: ${COL_TEXT}; }
-    #sc-widget-test .sc-pill.sc-armed { background: rgba(243, 139, 168, 0.22) !important; color: #f38ba8; }
+    #sc-widget-test .sc-pill.sc-armed { background: rgba(255, 99, 90, 0.22) !important; color: #ff8d86; }
     #sc-widget-test .sc-pill-row { display: flex; flex-wrap: wrap; gap: 6px; }
     #sc-widget-test .sc-pill-row > .sc-pill { flex: 1 1 88px; min-width: 0; }
     #sc-widget-test .sc-version { text-align: center; font-size: 9px; color: ${COL_TEXT_FAINT}; }
@@ -2390,7 +2394,7 @@ function scWidgetInit() {
       // rendered for every distinct radius), so it moves in 3px steps and
       // gets reused from cache; the alpha is cheap and stays smooth.
       const rad = 8 + Math.round(displayGlow * 26 / 3) * 3;
-      const alpha = (Math.round((0.12 + displayGlow * 0.4) * 50) / 50).toFixed(2);
+      const alpha = (Math.round((0.07 + displayGlow * 0.26) * 50) / 50).toFixed(2);
       const shadow = "0 0 " + rad + "px rgba(255, 255, 255, " + alpha + ")";
       if (mini) {
         if (shadow !== glowWrittenMini) { glowWrittenMini = shadow; miniArtWrap.style.boxShadow = shadow; }
