@@ -7,6 +7,12 @@
 // NOTE: keep this file pure ASCII. The loader reads it as Latin-1, so any
 // raw UTF-8 symbol shows up as garbage. Use \uXXXX escapes in strings.
 //
+// v2.2.6
+//  - Cover art sits in its own clip layer (clip-path with rounded corners),
+//    because a blurred (eye button) cover was not clipped to the rounded
+//    frame. While blurred it is also scaled up, so the blur edge no longer
+//    fades to transparent inside the tile.
+//  - Widget rim is one flat colour all the way round (no gradient).
 // v2.2.5
 //  - Cover art (full and mini) now has its own rounded corners plus an
 //    isolated clip, so the image can no longer poke out past the frame.
@@ -986,7 +992,7 @@ function scFrameScript(EQ_BAR_COUNT) {
 // =====================================================================
 // CHROME SIDE (the widget itself)
 // =====================================================================
-const SC_WIDGET_VERSION = "2.2.5";
+const SC_WIDGET_VERSION = "2.2.6";
 
 function scWidgetInit() {
   if (document.getElementById("sc-widget-test")) return;
@@ -1217,12 +1223,12 @@ function scWidgetInit() {
       animation: sc-in 0.25s ease backwards;
     }
     @keyframes sc-in { from { opacity: 0; transform: translateY(4px); } }
-    /* Glass rim: a faint 1px ring, almost even all the way round (corners
-       a hair brighter than the edges). Static, so no per-frame cost. */
+    /* Glass rim: one flat, faint 1px ring, identical all the way round (no
+       gradient, no brighter corners). Static, so no per-frame cost. */
     #sc-widget-test::before {
       content: ""; position: absolute; inset: 0; padding: 1px; box-sizing: border-box;
       border-radius: inherit; pointer-events: none;
-      background: linear-gradient(145deg, rgba(255, 255, 255, 0.15) 0%, rgba(255, 255, 255, 0.08) 50%, rgba(255, 255, 255, 0.14) 100%);
+      background: rgba(255, 255, 255, 0.10);
       mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
       mask-composite: exclude;
     }
@@ -1472,9 +1478,18 @@ function scWidgetInit() {
   artworkEl.title = "Go to SoundCloud tab";
   artworkEl.style.cssText = `
     width: 100%; height: 100%; border-radius: inherit; background-size: cover;
-    background-position: center; transition: filter 0.15s ease;
+    background-position: center; transition: filter 0.15s ease, transform 0.15s ease;
   `;
-  artworkWrapper.appendChild(artworkEl);
+  // Firefox does not reliably clip a FILTERED child (the blur mode) to a
+  // rounded parent, so the picture lives in its own layer with a clip-path.
+  // The glow box-shadow stays on the wrapper, outside the clip.
+  const artClip = el("div");
+  artClip.style.cssText = `
+    position: absolute; inset: 0; border-radius: 12px; overflow: hidden;
+    clip-path: inset(0 round 12px);
+  `;
+  artClip.appendChild(artworkEl);
+  artworkWrapper.appendChild(artClip);
 
   function buildEyeSvg(closed) {
     const svg = document.createElementNS(SVG_NS, "svg");
@@ -1682,9 +1697,15 @@ function scWidgetInit() {
   miniArt.title = "Go to SoundCloud tab";
   miniArt.style.cssText = `
     width: 100%; height: 100%; border-radius: inherit; background-size: cover;
-    background-position: center; transition: filter 0.15s ease;
+    background-position: center; transition: filter 0.15s ease, transform 0.15s ease;
   `;
-  miniArtWrap.appendChild(miniArt);
+  const miniArtClip = el("div");
+  miniArtClip.style.cssText = `
+    position: absolute; inset: 0; border-radius: 8px; overflow: hidden;
+    clip-path: inset(0 round 8px);
+  `;
+  miniArtClip.appendChild(miniArt);
+  miniArtWrap.appendChild(miniArtClip);
 
   const miniText = el("div");
   miniText.style.cssText = `flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px;`;
@@ -1935,8 +1956,12 @@ function scWidgetInit() {
   // Blur (remembered)
   function applyBlur(v) {
     settings.blur = v;
-    artworkEl.style.filter = v ? "blur(16px)" : "none";
-    miniArt.style.filter = v ? "blur(8px)" : "none";
+    // Scaled up while blurred so the soft, see-through blur edge falls
+    // outside the clip and the tile stays a solid rounded square.
+    artworkEl.style.filter = v ? "blur(12px)" : "none";
+    artworkEl.style.transform = v ? "scale(1.4)" : "none";
+    miniArt.style.filter = v ? "blur(6px)" : "none";
+    miniArt.style.transform = v ? "scale(1.6)" : "none";
     widgetDiv.classList.toggle("sc-blur", v);
     eyeBtn.textContent = "";
     eyeBtn.appendChild(buildEyeSvg(v));
