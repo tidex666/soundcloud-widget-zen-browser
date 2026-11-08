@@ -7,6 +7,13 @@
 // NOTE: keep this file pure ASCII. The loader reads it as Latin-1, so any
 // raw UTF-8 symbol shows up as garbage. Use \uXXXX escapes in strings.
 //
+// v2.1.2
+//  - Settings icon is now a normal 8-tooth cog (generated from geometry).
+//  - Clicking a favourite/history row now plays it right in the widget:
+//    no SoundCloud tab gets selected, and if no tab is open one is opened
+//    in the BACKGROUND. The frame script grants the page a user gesture
+//    before pressing play so the autoplay policy doesn't block it, and
+//    (RESTORE_PAGE) goes back to the page the tab was on afterwards.
 // v2.1.1
 //  - Favourite/library buttons split out of the prev/play/next row into
 //    their own row, so play is always dead-center and never wraps with
@@ -70,11 +77,19 @@ function scFrameScript(EQ_BAR_COUNT) {
   }
 
   // ------------------------------------------------------------------
-  // Player controls (unchanged behaviour)
+  // Player controls
   // ------------------------------------------------------------------
+
+  // Chrome-only: marks the page as having had a user gesture, so
+  // Firefox's autoplay policy lets our (synthetic) play click through.
+  function activateDoc() {
+    try { content.document.notifyUserGestureActivation(); } catch (e) {}
+  }
+
   function dispatchClick(selector) {
     const btn = content.document.querySelector(selector);
     if (btn) {
+      activateDoc();
       btn.dispatchEvent(new content.MouseEvent("click", { bubbles: true, cancelable: true, view: content }));
     }
     return !!btn;
@@ -162,11 +177,17 @@ function scFrameScript(EQ_BAR_COUNT) {
   // Play a track by URL (history / favourites).
   // 1. Client-side navigation (SoundCloud's router picks up link clicks,
   //    so the music/page doesn't reload).
-  // 2. Wait for the track page, press its big play button.
+  // 2. Wait for the track page, press its big play button (with a user
+  //    gesture marked on the page so autoplay isn't blocked).
   // 3. If the router didn't react, fall back to a normal page load.
+  // 4. Once playing, go back to the page the tab was on (RESTORE_PAGE).
   // Uses chrome timers so it survives a full page load.
   // ------------------------------------------------------------------
   let pendingPlay = null;
+  let lastPlayReq = { path: "", t: 0 };
+  // After starting a track via client-side navigation, go back to the page
+  // the tab was on. Set to false to leave the tab on the track page.
+  const RESTORE_PAGE = true;
 
   function pathOf(href) {
     try { return new content.URL(href, content.location.href).pathname.replace(/\/+$/, ""); } catch (e) { return null; }
@@ -199,7 +220,23 @@ function scFrameScript(EQ_BAR_COUNT) {
   }
 
   function clickEl(b) {
-    b.dispatchEvent(new content.MouseEvent("click", { bubbles: true, cancelable: true, view: content, button: 0 }));
+    activateDoc();
+    let handle = null;
+    try { handle = content.windowUtils.setHandlingUserInput(true); } catch (e) {}
+    try {
+      b.dispatchEvent(new content.MouseEvent("click", { bubbles: true, cancelable: true, view: content, button: 0 }));
+    } finally {
+      try { if (handle) handle.destruct(); } catch (e) {}
+    }
+  }
+
+  function finishJob(job, ok) {
+    if (pendingPlay === job) pendingPlay = null;
+    if (ok && RESTORE_PAGE && job.navigated && !job.hardNav) {
+      try {
+        if (pathOf(content.location.href) === job.path) content.history.back();
+      } catch (e) {}
+    }
   }
 
   function pumpPendingPlay() {
@@ -210,21 +247,27 @@ function scFrameScript(EQ_BAR_COUNT) {
       const here = pathOf(content.location.href);
       if (badgePath() === job.path) {
         // Track is loaded in the player bar.
-        if (!job.clicked && !isPlayingNow()) dispatchClick(".playControls__play");
-        if (job.clicked || isPlayingNow() || job.tries > 8) { pendingPlay = null; return; }
+        if (isPlayingNow()) { finishJob(job, true); return; }
+        if (!job.clicked) {
+          job.clicked = true;
+          job.clickedAt = job.tries;
+          dispatchClick(".playControls__play");
+        } else if (job.tries - job.clickedAt > 15) {
+          finishJob(job, false); return;
+        }
       } else if (here === job.path) {
         if (!job.clicked) {
           const b = findHeroPlay();
           if (b) { clickEl(b); job.clicked = true; job.clickedAt = job.tries; }
         } else if (job.tries - job.clickedAt > 20) {
-          pendingPlay = null; return;
+          finishJob(job, false); return;
         }
       } else if (job.tries === 12 && !job.hardNav) {
         job.hardNav = true;
         content.location.href = job.url;
       }
     } catch (e) {}
-    if (job.tries > 80) { pendingPlay = null; return; }
+    if (job.tries > 80) { if (pendingPlay === job) pendingPlay = null; return; }
     if (pendingPlay === job) schedule(pumpPendingPlay, 200);
   }
 
@@ -232,11 +275,24 @@ function scFrameScript(EQ_BAR_COUNT) {
     try {
       const u = new content.URL(String(msg.data && msg.data.url || ""));
       if (u.host.indexOf("soundcloud.com") === -1) return;
+      // Freshly opened tab may still be about:blank -> stay silent (no ack)
+      // so the widget keeps retrying until the page is really there.
+      if (!isSoundCloud(content)) return;
+
       const path = u.pathname.replace(/\/+$/, "");
-      const job = { path: path, url: "https://soundcloud.com" + path, tries: 0, clicked: false, clickedAt: 0, hardNav: false };
+      const now = Date.now();
+      if (lastPlayReq.path === path && now - lastPlayReq.t < 5000) return;
+      lastPlayReq = { path: path, t: now };
+
+      const job = {
+        path: path, url: "https://soundcloud.com" + path,
+        tries: 0, clicked: false, clickedAt: 0, hardNav: false, navigated: false
+      };
       pendingPlay = job;
+      activateDoc();
 
       if (badgePath() !== path && pathOf(content.location.href) !== path) {
+        job.navigated = true;
         const doc = content.document;
         const a = doc.createElement("a");
         a.href = path;
@@ -245,6 +301,7 @@ function scFrameScript(EQ_BAR_COUNT) {
         clickEl(a);
         a.remove();
       }
+      sendAsyncMessage("SCWidget:PlayUrlAck", { path: path });
       schedule(pumpPendingPlay, 250);
     } catch (e) {
       log("playUrl failed: " + (e && e.message));
@@ -575,13 +632,13 @@ function scFrameScript(EQ_BAR_COUNT) {
 // =====================================================================
 // CHROME SIDE (the widget itself)
 // =====================================================================
-const SC_WIDGET_VERSION = "2.1.1";
+const SC_WIDGET_VERSION = "2.1.2";
 
 function scWidgetInit() {
   if (document.getElementById("sc-widget-test")) return;
   console.log("[SC-WIDGET] init v" + SC_WIDGET_VERSION);
 
-  // ---- Palette (Catppuccin Mocha) ----
+  // ---- Palette ----
   // Neutral glass/mica palette (no purple/blue tint) so the widget blends
   // into any mica/acrylic sidebar theme instead of fighting it.
   const COL_BG = "#18181b";
@@ -679,7 +736,21 @@ function scWidgetInit() {
     x: "M7 7l10 10M17 7L7 17",
     star: "M12 3.3l2.68 5.43 5.99.87-4.33 4.23 1.02 5.97L12 17.0l-5.36 2.8 1.02-5.97L3.33 9.6l5.99-.87z",
     list: ["M4 6h12", "M4 11h12", "M4 16h7", "M16 14.5v6l5-3z"],
-    gear: "M12 1a1 1 0 0 1 1 1v2.12a7 7 0 0 1 1.75.78l1.5-1.5a1 1 0 1 1 1.41 1.41l-1.5 1.5c.33.55.6 1.14.78 1.75H21a1 1 0 1 1 0 2h-2.12c.18.61.45 1.2.78 1.75l1.5 1.5a1 1 0 0 1-1.41 1.41l-1.5-1.5a7 7 0 0 1-1.75.78V20a1 1 0 1 1-2 0v-2.12a7 7 0 0 1-1.75-.78l-1.5 1.5a1 1 0 0 1-1.41-1.41l1.5-1.5a7 7 0 0 1-.78-1.75H3a1 1 0 1 1 0-2h2.12a7 7 0 0 1 .78-1.75l-1.5-1.5A1 1 0 0 1 5.81 7.5l1.5 1.5c.55-.33 1.14-.6 1.75-.78V6.1A1 1 0 0 1 10 5.1V3a1 1 0 0 1 1-1zm0 7a3 3 0 1 0 0 6 3 3 0 0 0 0-6z"
+    // Normal 8-tooth cog outline + center hole, built from geometry so
+    // it's perfectly symmetric. This is an ARRAY of path strings.
+    gear: (function () {
+      const teeth = 8, rOut = 9.5, rIn = 7.2, cx = 12, cy = 12;
+      const step = Math.PI * 2 / teeth;
+      const pt = (a, r) => (cx + r * Math.cos(a)).toFixed(2) + " " + (cy + r * Math.sin(a)).toFixed(2);
+      let d = "";
+      for (let i = 0; i < teeth; i++) {
+        const c = i * step;
+        d += (i === 0 ? "M" : "A" + rIn + " " + rIn + " 0 0 1 ") + pt(c - 0.28 * step, rIn) + " ";
+        d += "L" + pt(c - 0.16 * step, rOut) + " L" + pt(c + 0.16 * step, rOut) + " L" + pt(c + 0.28 * step, rIn) + " ";
+      }
+      d += "A" + rIn + " " + rIn + " 0 0 1 " + pt(-0.28 * step, rIn) + " Z";
+      return [d, "M9 12a3 3 0 1 0 6 0a3 3 0 1 0-6 0"];
+    })()
   };
   const iconChevron = (d) => icon([PATHS[d]], { stroke: COL_TEXT, sw: 3, size: 10 });
   const iconStar = (on, size) => icon([PATHS.star], { size: size || 12, stroke: COL_TEXT, sw: 2, fill: on ? COL_TEXT : "none" });
@@ -974,7 +1045,7 @@ function scWidgetInit() {
   const gearBtn = btn("sc-corner", 18, "Settings");
   gearBtn.id = "sc-widget-gear";
   gearBtn.style.left = "6px";
-  gearBtn.appendChild(icon([PATHS.gear], { stroke: COL_TEXT, sw: 2.2, size: 11 }));
+  gearBtn.appendChild(icon(PATHS.gear, { stroke: COL_TEXT, sw: 1.8, size: 12 }));
   widgetDiv.appendChild(gearBtn);
 
   const minBtn = btn("sc-corner", 18, "Minimize");
@@ -1125,7 +1196,7 @@ function scWidgetInit() {
   timeRow.appendChild(timeEl);
   timeRow.appendChild(muteBtn);
 
-  // Controls: [fav] [prev] [play] [next] [library]
+  // Controls: [prev] [play] [next]  /  second row: [fav] [library]
   const controlsRow = el("div");
   controlsRow.style.cssText = `
     display: flex; align-items: center; justify-content: center; gap: 6px;
@@ -1904,35 +1975,47 @@ function scWidgetInit() {
     sendToSoundCloudTab("SCWidget:GetInfo", "SCWidget:GetInfoReply", updateFromInfo);
   }
 
+  let playRetryTimer = null;
+  let playAcked = false;
+
+  // Keep nudging the tab until its frame script confirms it picked the
+  // request up (a brand-new tab needs a moment to load SoundCloud).
+  function sendPlayWithRetry(tab, url) {
+    clearInterval(playRetryTimer);
+    playAcked = false;
+    let tries = 0;
+    const send = () => {
+      if (playAcked || ++tries > 25) {
+        clearInterval(playRetryTimer);
+        playRetryTimer = null;
+        return;
+      }
+      try { tab.linkedBrowser.messageManager.sendAsyncMessage("SCWidget:PlayUrl", { url: url }); } catch (e) {}
+    };
+    send();
+    playRetryTimer = setInterval(send, 600);
+  }
+
   function playEntry(it) {
     setView("player");
-    const existing = findSoundCloudTab();
-    if (!existing) {
-      // No SoundCloud tab open at all -> sendToSoundCloudTab would just
-      // hideWidget() and silently do nothing. Open one at the track and
-      // deliver PlayUrl once its frame script is up, so favourites/history
-      // work even when the site isn't already open somewhere.
-      let tab;
+    let tab = findSoundCloudTab();
+    if (!tab) {
+      // No SoundCloud tab yet: open one IN THE BACKGROUND (don't select it),
+      // the frame script starts playback by itself.
       try {
-        tab = gBrowser.addTab(it.url, { triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal() });
-        gBrowser.selectedTab = tab;
+        tab = gBrowser.addTab(it.url, {
+          triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal(),
+          inBackground: true
+        });
       } catch (e) {
         console.log("[SC-WIDGET] open tab for playEntry failed: " + (e && e.message));
         return;
       }
-      const mm = tab.linkedBrowser.messageManager;
-      const send = () => { try { mm.sendAsyncMessage("SCWidget:PlayUrl", { url: it.url }); } catch (e) {} };
-      // The frame script loads process-wide, but give the new tab a moment
-      // to spin up; retry a couple of times in case the first send races it.
-      setTimeout(send, 500);
-      setTimeout(send, 1500);
-      setTimeout(pollInfo, 1800);
-      setTimeout(pollInfo, 3000);
-      return;
     }
-    sendToSoundCloudTab("SCWidget:PlayUrl", null, null, { url: it.url });
-    setTimeout(pollInfo, 600);
-    setTimeout(pollInfo, 1500);
+    sendPlayWithRetry(tab, it.url);
+    setTimeout(pollInfo, 800);
+    setTimeout(pollInfo, 2000);
+    setTimeout(pollInfo, 3500);
   }
 
   function openInNewTab(url) {
@@ -2022,6 +2105,12 @@ function scWidgetInit() {
     eqContainer.title = "EQ: " + st;
     miniEq.title = "EQ: " + st;
     console.log("[SC-WIDGET][tab] " + st);
+  });
+
+  // Frame script confirms it picked up a PlayUrl request -> stop retrying.
+  window.messageManager.addMessageListener("SCWidget:PlayUrlAck", () => {
+    playAcked = true;
+    setTimeout(pollInfo, 300);
   });
 
   window.messageManager.addMessageListener("SCWidget:AudioData", (msg) => {
