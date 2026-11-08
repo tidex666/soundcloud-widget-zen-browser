@@ -618,13 +618,12 @@ function scWidgetInit() {
   }
   function setNum(n, v) { try { Services.prefs.setStringPref(PREFIX + n, String(v)); } catch (e) {} }
 
-  const DEFAULTS = { sensitivity: 1.6, showEq: true, glow: true, history: true, likeOnFav: false };
+  const DEFAULTS = { sensitivity: 1.6, showEq: true, glow: true, history: true };
   const settings = {
     sensitivity: Math.min(SENS_MAX, Math.max(SENS_MIN, getNum("sensitivity", DEFAULTS.sensitivity))),
     showEq: getBool("showEq", DEFAULTS.showEq),
     glow: getBool("glow", DEFAULTS.glow),
     history: getBool("history", DEFAULTS.history),
-    likeOnFav: getBool("likeOnFav", DEFAULTS.likeOnFav),
     blur: getBool("blur", false),
     minimized: getBool("minimized", false)
   };
@@ -680,7 +679,7 @@ function scWidgetInit() {
     x: "M7 7l10 10M17 7L7 17",
     star: "M12 3.3l2.68 5.43 5.99.87-4.33 4.23 1.02 5.97L12 17.0l-5.36 2.8 1.02-5.97L3.33 9.6l5.99-.87z",
     list: ["M4 6h12", "M4 11h12", "M4 16h7", "M16 14.5v6l5-3z"],
-    gear: "M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 11-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 110-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 114 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 110 4h-.09a1.65 1.65 0 00-1.51 1z"
+    gear: "M12 2.5v2.2m0 16.6v2.2M4.9 4.9l1.6 1.6m11 11l1.6 1.6M2.5 12h2.2m16.6 0h2.2M4.9 19.1l1.6-1.6m11-11l1.6-1.6M12 8.2a3.8 3.8 0 100 7.6 3.8 3.8 0 000-7.6z"
   };
   const iconChevron = (d) => icon([PATHS[d]], { stroke: COL_TEXT, sw: 3, size: 10 });
   const iconStar = (on, size) => icon([PATHS.star], { size: size || 12, stroke: COL_TEXT, sw: 2, fill: on ? COL_TEXT : "none" });
@@ -1330,7 +1329,6 @@ function scWidgetInit() {
   addToggle(cardLook, "Equalizer", "showEq", applyVisualSettings);
   addToggle(cardLook, "Cover glow", "glow", applyVisualSettings);
   addToggle(cardLib, "Remember history", "history");
-  addToggle(cardLib, "Like on SoundCloud when starring", "likeOnFav");
 
   const pillRow = el("div", "sc-pill-row");
   const clearHistBtn = el("button", "sc-pill");
@@ -1630,15 +1628,7 @@ function scWidgetInit() {
     star.appendChild(iconStar(fav, 11));
     star.addEventListener("click", (e) => {
       e.stopPropagation();
-      const nowFav = toggleFav(it);
-      // Only the currently-playing track's like state is known here (it's
-      // read live from the SoundCloud tab); syncing an arbitrary other
-      // row would require navigating away to load its page.
-      if (settings.likeOnFav && it.url === current.url) {
-        if ((nowFav && !current.liked) || (!nowFav && current.liked)) {
-          sendToSoundCloudTab("SCWidget:ToggleLike", "SCWidget:ToggleLikeReply", updateFromInfo);
-        }
-      }
+      toggleFav(it);
     });
     actions.appendChild(star);
 
@@ -2090,14 +2080,6 @@ function scWidgetInit() {
     favBtn.classList.remove("sc-pop");
     void favBtn.offsetWidth;
     favBtn.classList.add("sc-pop");
-    // Keep the SoundCloud like in sync in both directions: liking when a
-    // track is favourited, and un-liking when it's un-favourited (this used
-    // to only ever add the like, never remove it).
-    if (settings.likeOnFav) {
-      if ((nowFav && !current.liked) || (!nowFav && current.liked)) {
-        sendToSoundCloudTab("SCWidget:ToggleLike", "SCWidget:ToggleLikeReply", updateFromInfo);
-      }
-    }
   });
 
   artworkEl.addEventListener("click", goToTab);
