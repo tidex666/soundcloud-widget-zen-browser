@@ -7,6 +7,11 @@
 // NOTE: keep this file pure ASCII. The loader reads it as Latin-1, so any
 // raw UTF-8 symbol shows up as garbage. Use \uXXXX escapes in strings.
 //
+// v2.2.3
+//  - Rim highlight cut way down and made nearly uniform (a hair brighter
+//    on the corners), glass made more see-through (7% tint, smaller blur,
+//    stronger saturation) with a soft dark inner edge for depth instead of
+//    white highlights.
 // v2.2.2
 //  - Glass rework: much more transparent surface (light tint + blur only),
 //    1px bevel rim instead of border + heavy shadows, flat faint-fill
@@ -963,7 +968,7 @@ function scFrameScript(EQ_BAR_COUNT) {
 // =====================================================================
 // CHROME SIDE (the widget itself)
 // =====================================================================
-const SC_WIDGET_VERSION = "2.2.2";
+const SC_WIDGET_VERSION = "2.2.3";
 
 function scWidgetInit() {
   if (document.getElementById("sc-widget-test")) return;
@@ -1178,13 +1183,14 @@ function scWidgetInit() {
     padding: 10px 12px;
     box-sizing: border-box;
     -moz-window-dragging: no-drag;
-    background: rgba(20, 20, 24, 0.12);
-    backdrop-filter: blur(18px) saturate(175%) brightness(0.92);
+    background: rgba(20, 20, 24, 0.07);
+    backdrop-filter: blur(14px) saturate(190%) brightness(0.9);
     border: none;
     border-radius: 20px;
     box-shadow:
-      0 12px 32px -10px rgba(0, 0, 0, 0.30),
-      inset 0 0 16px rgba(255, 255, 255, 0.04);
+      0 12px 32px -10px rgba(0, 0, 0, 0.28),
+      inset 0 -12px 22px -16px rgba(0, 0, 0, 0.30),
+      inset 0 0 14px rgba(255, 255, 255, 0.025);
     transition: opacity 0.12s ease;
   `;
 
@@ -1192,16 +1198,16 @@ function scWidgetInit() {
   styleTag.textContent = `
     #sc-widget-test {
       font-family: system-ui, -apple-system, sans-serif; color: ${COL_TEXT}; font-size: 11px;
-      text-shadow: 0 1px 3px rgba(0, 0, 0, 0.32);
+      text-shadow: 0 1px 3px rgba(0, 0, 0, 0.42);
       animation: sc-in 0.25s ease backwards;
     }
     @keyframes sc-in { from { opacity: 0; transform: translateY(4px); } }
-    /* Glass rim: a 1px ring that is bright at the top-left and bottom-right,
-       like light catching a bevelled edge. Static, so no per-frame cost. */
+    /* Glass rim: a faint 1px ring, almost even all the way round (corners
+       a hair brighter than the edges). Static, so no per-frame cost. */
     #sc-widget-test::before {
       content: ""; position: absolute; inset: 0; padding: 1px; box-sizing: border-box;
       border-radius: inherit; pointer-events: none;
-      background: linear-gradient(145deg, rgba(255, 255, 255, 0.50) 0%, rgba(255, 255, 255, 0.10) 26%, rgba(255, 255, 255, 0.03) 55%, rgba(255, 255, 255, 0.20) 100%);
+      background: linear-gradient(145deg, rgba(255, 255, 255, 0.15) 0%, rgba(255, 255, 255, 0.08) 50%, rgba(255, 255, 255, 0.14) 100%);
       mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
       mask-composite: exclude;
     }
@@ -1262,7 +1268,7 @@ function scWidgetInit() {
     /* cover art: just a hairline ring so it sits on the glass */
     #sc-widget-test .sc-art::after {
       content: ""; position: absolute; inset: 0; border-radius: inherit; pointer-events: none;
-      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.09);
     }
 
     /* progress bar: grows on hover and shows a thumb */
