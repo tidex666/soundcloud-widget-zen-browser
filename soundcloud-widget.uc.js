@@ -7,6 +7,10 @@
 // NOTE: keep this file pure ASCII. The loader reads it as Latin-1, so any
 // raw UTF-8 symbol shows up as garbage. Use \uXXXX escapes in strings.
 //
+// v2.1.3
+//  - Track-page play button lookup rewritten: it's an <a>, not a <button>,
+//    and the player bar's own play button shares its class, so the bar is
+//    now excluded explicitly. Falls back to title/aria-label matching.
 // v2.1.2
 //  - Settings icon is now a normal 8-tooth cog (generated from geometry).
 //  - Clicking a favourite/history row now plays it right in the widget:
@@ -203,18 +207,47 @@ function scFrameScript(EQ_BAR_COUNT) {
     return !!b && (b.classList.contains("playing") || /pause/i.test(b.title || ""));
   }
 
+  // The player bar's own play button ALSO carries .sc-button-play, so
+  // everything inside the bar must be excluded. The big play button on a
+  // track page is usually an <a>, not a <button>, and class names change,
+  // so: try known hero containers first, then any visible play-looking
+  // control outside the bar / track lists, then match by title/aria-label.
+  function isVisibleEl(b) {
+    try { return b.getClientRects().length > 0; } catch (e) { return true; }
+  }
+  function isBarEl(b) {
+    try {
+      return !!b.closest(".playControls, .playbackSoundBadge, .playControls__elements") ||
+        b.classList.contains("playControls__play");
+    } catch (e) { return false; }
+  }
   function findHeroPlay() {
-    const sels = [
-      ".fullHero__foreground .sc-button-play",
-      ".fullListenHero .sc-button-play",
-      ".l-listen-hero .sc-button-play",
-      ".listenHero .sc-button-play",
-      ".fullHero .playButton",
-      ".soundTitle__playButton .sc-button-play"
+    const d = content.document;
+    const containers = [
+      ".fullHero", ".fullListenHero", ".l-listen-hero", ".listenHero",
+      ".soundTitle", ".listenEngagement", ".l-about-top", ".listenContent"
     ];
-    for (const sel of sels) {
-      const b = content.document.querySelector(sel);
-      if (b) return b;
+    const inner = "a.sc-button-play, button.sc-button-play, .sc-button-play, " +
+      "[class*='playButton'], [class*='PlayButton']";
+    for (const c of containers) {
+      for (const root of d.querySelectorAll(c)) {
+        for (const b of root.querySelectorAll(inner)) {
+          if (!isBarEl(b) && isVisibleEl(b)) return b;
+        }
+      }
+    }
+    for (const b of d.querySelectorAll(inner)) {
+      if (isBarEl(b) || !isVisibleEl(b)) continue;
+      if (b.closest(".soundList, .trackList, .sidebarModule, .l-sidebar-right, .soundBadgeList, .systemPlaylistTrackList")) continue;
+      return b;
+    }
+    for (const b of d.querySelectorAll("a, button, [role='button']")) {
+      if (isBarEl(b) || !isVisibleEl(b)) continue;
+      const label = ((b.getAttribute("title") || "") + " " + (b.getAttribute("aria-label") || "")).trim();
+      if (/^play\b/i.test(label) && !/playlist/i.test(label)) {
+        if (b.closest(".soundList, .trackList, .sidebarModule, .l-sidebar-right")) continue;
+        return b;
+      }
     }
     return null;
   }
@@ -258,7 +291,12 @@ function scFrameScript(EQ_BAR_COUNT) {
       } else if (here === job.path) {
         if (!job.clicked) {
           const b = findHeroPlay();
-          if (b) { clickEl(b); job.clicked = true; job.clickedAt = job.tries; }
+          if (b) {
+            clickEl(b); job.clicked = true; job.clickedAt = job.tries;
+            log("hero play clicked: " + String(b.tagName) + "." + String(b.className).slice(0, 60));
+          } else if (job.tries === 15) {
+            log("hero play button NOT found on " + here);
+          }
         } else if (job.tries - job.clickedAt > 20) {
           finishJob(job, false); return;
         }
@@ -632,7 +670,7 @@ function scFrameScript(EQ_BAR_COUNT) {
 // =====================================================================
 // CHROME SIDE (the widget itself)
 // =====================================================================
-const SC_WIDGET_VERSION = "2.1.2";
+const SC_WIDGET_VERSION = "2.1.3";
 
 function scWidgetInit() {
   if (document.getElementById("sc-widget-test")) return;
