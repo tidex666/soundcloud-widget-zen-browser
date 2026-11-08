@@ -7,6 +7,11 @@
 // NOTE: keep this file pure ASCII. The loader reads it as Latin-1, so any
 // raw UTF-8 symbol shows up as garbage. Use \uXXXX escapes in strings.
 //
+// v2.2.0
+//  - Volume control: hover the speaker button and the time text is replaced
+//    by a volume slider (drag, click or scroll). Works through SoundCloud's
+//    own volume slider, so SoundCloud remembers the level. Choosing a
+//    volume also un-mutes.
 // v2.1.9
 //  - Settings icon is now the rounded 6-lobe cog (Lucide "settings" shape).
 //  - Lower CPU use, same look: EQ/glow loop capped at ~30 fps with
@@ -146,6 +151,7 @@ function scFrameScript(EQ_BAR_COUNT) {
     const progressWrapper = d.querySelector(".playbackTimeline__progressWrapper");
     const artworkEl = d.querySelector('.playbackSoundBadge .sc-artwork[style*="background-image"]');
     const volumeBtn = d.querySelector(".volume__button");
+    readVolume();
 
     const titleLink = d.querySelector(".playbackSoundBadge__titleLink");
     const artistLink = d.querySelector(".playbackSoundBadge__lightLink");
@@ -173,12 +179,14 @@ function scFrameScript(EQ_BAR_COUNT) {
       artworkUrl: extractArtworkUrl(artworkEl),
       currentTime: progressWrapper ? parseFloat(progressWrapper.getAttribute("aria-valuenow")) : 0,
       duration: progressWrapper ? parseFloat(progressWrapper.getAttribute("aria-valuemax")) : 0,
-      muted: volumeBtn ? volumeBtn.innerHTML.includes("13.4697 10.5303") : false
+      muted: volumeBtn ? volumeBtn.innerHTML.includes("13.4697 10.5303") : false,
+      volume: lastVolume
     };
   }
 
   addMessageListener("SCWidget:GetInfo", function () {
     sendAsyncMessage("SCWidget:GetInfoReply", getInfo());
+    if (lastVolume === null && !volProbed) probeVolume();
   });
 
   addMessageListener("SCWidget:TogglePlay", function () {
@@ -200,6 +208,139 @@ function scFrameScript(EQ_BAR_COUNT) {
   addMessageListener("SCWidget:ToggleMute", function () {
     dispatchClick(".volume__button");
     sendAsyncMessage("SCWidget:ToggleMuteReply", getInfo());
+  });
+
+
+  // ------------------------------------------------------------------
+  // Volume
+  //
+  // SoundCloud's volume control is a vertical role="slider" (aria-valuenow
+  // 0..1) that only has a size while the control is hovered. So: fake the
+  // hover, click the slider at the right height, read the value back and
+  // nudge a couple of times if SoundCloud maps the click slightly
+  // differently. Timers come from `schedule` (chrome-side), so a
+  // background tab's 1 s timer throttling doesn't slow this down.
+  // ------------------------------------------------------------------
+  let lastVolume = null;
+  let volTask = 0;
+  let volProbed = false;
+
+  function readVolume() {
+    try {
+      const w = content.document.querySelector(".volume__sliderWrapper");
+      const v = w ? parseFloat(w.getAttribute("aria-valuenow")) : NaN;
+      if (isFinite(v)) { lastVolume = v; return v; }
+    } catch (e) {}
+    return null;
+  }
+
+  function volEvent(type, x, y) {
+    const init = {
+      bubbles: !/enter|leave/.test(type), cancelable: true, view: content,
+      clientX: x, clientY: y, relatedTarget: null
+    };
+    if (/^pointer/.test(type)) {
+      return new content.PointerEvent(type, Object.assign(init, { pointerId: 1, pointerType: "mouse", isPrimary: true }));
+    }
+    return new content.MouseEvent(type, init);
+  }
+
+  function volHover(on) {
+    const d = content.document;
+    const btn = d.querySelector(".volume__button");
+    if (!btn) return false;
+    const r = btn.getBoundingClientRect();
+    const x = r.left + r.width / 2;
+    const y = r.top + r.height / 2;
+    const targets = [btn, d.querySelector(".volume"), d.querySelector(".playControls__volume")];
+    const types = on
+      ? ["pointerover", "mouseover", "pointerenter", "mouseenter", "pointermove", "mousemove"]
+      : ["pointerout", "mouseout", "pointerleave", "mouseleave"];
+    for (const type of types) {
+      try {
+        if (/enter|leave/.test(type)) {
+          for (const t of targets) if (t) t.dispatchEvent(volEvent(type, x, y));
+        } else {
+          btn.dispatchEvent(volEvent(type, x, y));
+        }
+      } catch (e) {}
+    }
+    return true;
+  }
+
+  // First GetInfo: the slider may not exist until hovered, so peek once.
+  function probeVolume() {
+    volProbed = true;
+    if (!volHover(true)) { volProbed = false; return; }
+    schedule(function () { readVolume(); volHover(false); }, 80);
+  }
+
+  addMessageListener("SCWidget:SetVolume", function (msg) {
+    const target = Math.min(1, Math.max(0, Number(msg.data && msg.data.volume) || 0));
+    const id = ++volTask;      // a newer request cancels this one
+    const d = content.document;
+    let tries = 0, calib = 0, yOff = 0;
+
+    function done() {
+      if (id !== volTask) return;
+      try {
+        // Picking a real volume should also un-mute.
+        if (getInfo().muted && target > 0.01) dispatchClick(".volume__button");
+      } catch (e) {}
+      sendAsyncMessage("SCWidget:SetVolumeReply", getInfo());
+      schedule(function () { if (id === volTask) volHover(false); }, 700);
+    }
+
+    function step() {
+      if (id !== volTask) return;
+      try {
+        const wrap = d.querySelector(".volume__sliderWrapper");
+        const track = wrap && (wrap.querySelector(".volume__sliderBackground") || wrap);
+        const rect = track && track.getBoundingClientRect();
+        if (!rect || rect.height < 8) {
+          if (++tries > 8) { log("volume slider not found or not visible"); return done(); }
+          volHover(true);
+          schedule(step, 45);
+          return;
+        }
+        const x = rect.left + rect.width / 2;
+        // Full / zero volume: click a little past the end so it clamps there
+        // whatever the exact mapping is.
+        let y = rect.bottom - rect.height * target + yOff;
+        if (target >= 0.98) y = rect.top - 14;
+        else if (target <= 0.02) y = rect.bottom + 14;
+        const base = { bubbles: true, cancelable: true, view: content, clientX: x, clientY: y };
+        const ptr = (type, buttons) => new content.PointerEvent(type,
+          Object.assign({}, base, { pointerId: 1, pointerType: "mouse", isPrimary: true, button: 0, buttons: buttons }));
+        const mse = (type, buttons) => new content.MouseEvent(type,
+          Object.assign({}, base, { button: 0, buttons: buttons }));
+        wrap.dispatchEvent(ptr("pointerdown", 1));
+        wrap.dispatchEvent(mse("mousedown", 1));
+        wrap.dispatchEvent(ptr("pointermove", 1));
+        wrap.dispatchEvent(mse("mousemove", 1));
+        wrap.dispatchEvent(ptr("pointerup", 0));
+        wrap.dispatchEvent(mse("mouseup", 0));
+        wrap.dispatchEvent(mse("click", 0));
+        schedule(function () {
+          if (id !== volTask) return;
+          const now = readVolume();
+          if (now !== null && calib < 3 && target > 0.02 && target < 0.98 && Math.abs(now - target) > 0.02) {
+            calib++;
+            // too loud -> click lower (bigger y), too quiet -> higher
+            yOff = Math.max(-rect.height, Math.min(rect.height, yOff + (now - target) * rect.height));
+            step();
+            return;
+          }
+          done();
+        }, 35);
+      } catch (e) {
+        log("setVolume failed: " + (e && e.message));
+        done();
+      }
+    }
+
+    activateDoc();
+    step();
   });
 
   addMessageListener("SCWidget:ToggleLike", function () {
@@ -810,7 +951,7 @@ function scFrameScript(EQ_BAR_COUNT) {
 // =====================================================================
 // CHROME SIDE (the widget itself)
 // =====================================================================
-const SC_WIDGET_VERSION = "2.1.9";
+const SC_WIDGET_VERSION = "2.2.0";
 
 function scWidgetInit() {
   if (document.getElementById("sc-widget-test")) return;
@@ -1197,6 +1338,20 @@ function scWidgetInit() {
     #sc-widget-test .sc-slider:hover .sc-slider-thumb,
     #sc-widget-test .sc-slider.sc-dragging .sc-slider-thumb { transform: scale(1.2); }
 
+    /* ---- volume (slides over the time text on hover) ---- */
+    #sc-widget-test .sc-timerow { position: relative; }
+    #sc-widget-test .sc-timerow #sc-widget-time { transition: opacity 0.12s ease; }
+    #sc-widget-test .sc-timerow.sc-vol-open #sc-widget-time { opacity: 0; }
+    #sc-widget-test .sc-vol { display: flex; align-items: center; }
+    #sc-widget-test .sc-vol-hit {
+      position: absolute; left: 0; right: 20px; top: 0; bottom: 0;
+      display: flex; align-items: center; box-sizing: border-box; padding-right: 6px;
+      opacity: 0; pointer-events: none; touch-action: none;
+      transition: opacity 0.12s ease;
+    }
+    #sc-widget-test .sc-timerow.sc-vol-open .sc-vol-hit { opacity: 1; pointer-events: auto; }
+    #sc-widget-test .sc-vol-hit > .sc-slider { flex: 1; min-width: 0; }
+
     #sc-widget-test .sc-pill {
       height: 22px; padding: 0 10px; border-radius: 11px;
       background: ${COL_SURFACE}; color: ${COL_TEXT_DIM};
@@ -1365,7 +1520,22 @@ function scWidgetInit() {
   timeEl.id = "sc-widget-time";
   timeEl.style.cssText = `color: ${COL_TEXT_DIM}; font-size: 10px; font-variant-numeric: tabular-nums;`;
   timeRow.appendChild(timeEl);
-  timeRow.appendChild(muteBtn);
+  timeRow.classList.add("sc-timerow");
+
+  // Volume: hovering the speaker button swaps the time text for a slider.
+  const volWrap = el("div", "sc-vol");
+  const volHit = el("div", "sc-vol-hit");
+  const volBar = el("div", "sc-slider");
+  const volTrack = el("div", "sc-slider-track");
+  const volFill = el("div", "sc-slider-fill");
+  volTrack.appendChild(volFill);
+  const volThumb = el("div", "sc-slider-thumb");
+  volBar.appendChild(volTrack);
+  volBar.appendChild(volThumb);
+  volHit.appendChild(volBar);
+  volWrap.appendChild(volHit);
+  volWrap.appendChild(muteBtn);
+  timeRow.appendChild(volWrap);
 
   // Controls: [prev] [play] [next]  /  second row: [fav] [library]
   const controlsRow = el("div");
@@ -1932,6 +2102,24 @@ function scWidgetInit() {
   let candSince = 0;
   let lastRecordedUrl = null;
 
+  // ---- volume UI state ----
+  let volume = 1;              // 0..1, mirrors SoundCloud's slider
+  let volDragging = false;
+  let volHovered = false;
+  let volHoldUntil = 0;        // ignore polled values right after the user set one
+  let volUIKey = "";
+  function setVolUI() {
+    const v = Math.min(1, Math.max(0, isMuted ? 0 : volume));
+    const pct = (v * 100).toFixed(1) + "%";
+    const key = pct + "|" + Math.round(volume * 100);
+    if (key === volUIKey) return;
+    volUIKey = key;
+    volFill.style.width = pct;
+    volThumb.style.left = pct;
+    volBar.title = "Volume " + Math.round(volume * 100) + "% (drag or scroll)";
+  }
+  setVolUI();
+
   function setPlayIcon(node, s) {
     node.style.cssText = `
       width: 0; height: 0;
@@ -2016,6 +2204,10 @@ function scWidgetInit() {
       if (data.muted !== isMuted) setMuteIcon(data.muted);
       isMuted = data.muted;
     }
+    if (typeof data.volume === "number" && isFinite(data.volume) && !volDragging && Date.now() > volHoldUntil) {
+      volume = Math.min(1, Math.max(0, data.volume));
+    }
+    setVolUI();
 
     const cur = data.currentTime || 0;
     const duration = data.duration || 0;
@@ -2373,6 +2565,63 @@ function scWidgetInit() {
   muteBtn.addEventListener("click", () => {
     sendToSoundCloudTab("SCWidget:ToggleMute", "SCWidget:ToggleMuteReply", updateFromInfo);
   });
+
+  // Volume slider: drag / click / scroll. Requests are throttled; the tab
+  // side cancels older ones if a newer one arrives.
+  let volSendTimer = null, volPending = null, volLastSend = 0;
+  function sendVolume(v) {
+    volPending = v;
+    if (volSendTimer) return;
+    const wait = Math.max(0, 70 - (Date.now() - volLastSend));
+    volSendTimer = setTimeout(() => {
+      volSendTimer = null;
+      volLastSend = Date.now();
+      const val = volPending;
+      volPending = null;
+      sendToSoundCloudTab("SCWidget:SetVolume", "SCWidget:SetVolumeReply", updateFromInfo, { volume: val });
+    }, wait);
+  }
+  function setVolume(v) {
+    v = Math.round(Math.min(1, Math.max(0, v)) * 100) / 100;
+    volume = v;
+    volHoldUntil = Date.now() + 1500;
+    if (isMuted && v > 0.01) { isMuted = false; setMuteIcon(false); }
+    setVolUI();
+    sendVolume(v);
+  }
+  function volFromEvent(e) {
+    const r = volBar.getBoundingClientRect();
+    return (e.clientX - r.left) / (r.width || 1);
+  }
+  volWrap.addEventListener("mouseenter", () => {
+    volHovered = true;
+    timeRow.classList.add("sc-vol-open");
+  });
+  volWrap.addEventListener("mouseleave", () => {
+    volHovered = false;
+    if (!volDragging) timeRow.classList.remove("sc-vol-open");
+  });
+  volHit.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    volDragging = true;
+    volBar.classList.add("sc-dragging");
+    try { volHit.setPointerCapture(e.pointerId); } catch (err) {}
+    setVolume(volFromEvent(e));
+    e.preventDefault();
+  });
+  volHit.addEventListener("pointermove", (e) => { if (volDragging) setVolume(volFromEvent(e)); });
+  function endVolDrag() {
+    if (!volDragging) return;
+    volDragging = false;
+    volBar.classList.remove("sc-dragging");
+    if (!volHovered) timeRow.classList.remove("sc-vol-open");
+  }
+  volHit.addEventListener("pointerup", endVolDrag);
+  volHit.addEventListener("pointercancel", endVolDrag);
+  volWrap.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    setVolume(volume + (e.deltaY > 0 ? -0.05 : 0.05));
+  }, { passive: false });
   nextBtn.addEventListener("click", () => {
     sendToSoundCloudTab("SCWidget:Next", "SCWidget:NextReply", () => setTimeout(pollInfo, 300));
   });
