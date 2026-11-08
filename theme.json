@@ -3,7 +3,7 @@
   "name": "SoundCloud Widget",
   "description": "SoundCloud mini-player widget for the Zen sidebar.",
   "author": "tidex",
-  "version": "2.1.8",
+  "version": "2.1.9",
   "scripts": {
     "soundcloud-widget.uc.js": {
       "name": "Core script",
@@ -13,5 +13,5 @@
   },
   "tags": [],
   "createdAt": "2026-08-31",
-  "updatedAt": "2026-09-25"
+  "updatedAt": "2026-11-08"
 }

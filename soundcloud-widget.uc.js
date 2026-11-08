@@ -7,6 +7,15 @@
 // NOTE: keep this file pure ASCII. The loader reads it as Latin-1, so any
 // raw UTF-8 symbol shows up as garbage. Use \uXXXX escapes in strings.
 //
+// v2.1.9
+//  - Settings icon is now the rounded 6-lobe cog (Lucide "settings" shape).
+//  - Lower CPU use, same look: EQ/glow loop capped at ~30 fps with
+//    time-based smoothing (audio data only arrives at 20 Hz anyway), DOM
+//    writes only when a value actually changed, glow blur radius stepped so
+//    the GPU can cache the blur, loop sleeps while paused/hidden/in another
+//    panel, EQ boxes use CSS containment, row "now playing" bars animate
+//    with transform instead of height, and the tab-side analyser stops
+//    messaging (and slows down) while the audio is silent.
 // v2.1.8
 //  - Clicks ONE button only: the exact-title "Play" button (64px) of the track
 //    page iframe whose URL matches the requested track. No more cycling
@@ -745,6 +754,7 @@ function scFrameScript(EQ_BAR_COUNT) {
   };
 
   let tick = 0;
+  let wasSilent = false;
   function frame() {
     let next = 500;
     try {
@@ -776,7 +786,15 @@ function scFrameScript(EQ_BAR_COUNT) {
             } catch (e) {}
           }
           if (best) {
-            sendAsyncMessage("SCWidget:AudioData", best);
+            // Silence (paused / between tracks): send one all-zero frame so
+            // the widget settles, then stop messaging and poll slower.
+            let any = false;
+            for (let i = 0; i < best.bars.length; i++) {
+              if (best.bars[i] > 0.001) { any = true; break; }
+            }
+            if (any || !wasSilent) sendAsyncMessage("SCWidget:AudioData", best);
+            wasSilent = !any;
+            if (!any) next = 120;
             if (tick % 200 === 0) log("flowing, level=" + best.level.toFixed(3));
           }
         }
@@ -792,7 +810,7 @@ function scFrameScript(EQ_BAR_COUNT) {
 // =====================================================================
 // CHROME SIDE (the widget itself)
 // =====================================================================
-const SC_WIDGET_VERSION = "2.1.8";
+const SC_WIDGET_VERSION = "2.1.9";
 
 function scWidgetInit() {
   if (document.getElementById("sc-widget-test")) return;
@@ -896,21 +914,12 @@ function scWidgetInit() {
     x: "M7 7l10 10M17 7L7 17",
     star: "M12 3.3l2.68 5.43 5.99.87-4.33 4.23 1.02 5.97L12 17.0l-5.36 2.8 1.02-5.97L3.33 9.6l5.99-.87z",
     list: ["M4 6h12", "M4 11h12", "M4 16h7", "M16 14.5v6l5-3z"],
-    // Normal 8-tooth cog outline + center hole, built from geometry so
-    // it's perfectly symmetric. This is an ARRAY of path strings.
-    gear: (function () {
-      const teeth = 8, rOut = 9.5, rIn = 7.2, cx = 12, cy = 12;
-      const step = Math.PI * 2 / teeth;
-      const pt = (a, r) => (cx + r * Math.cos(a)).toFixed(2) + " " + (cy + r * Math.sin(a)).toFixed(2);
-      let d = "";
-      for (let i = 0; i < teeth; i++) {
-        const c = i * step;
-        d += (i === 0 ? "M" : "A" + rIn + " " + rIn + " 0 0 1 ") + pt(c - 0.28 * step, rIn) + " ";
-        d += "L" + pt(c - 0.16 * step, rOut) + " L" + pt(c + 0.16 * step, rOut) + " L" + pt(c + 0.28 * step, rIn) + " ";
-      }
-      d += "A" + rIn + " " + rIn + " 0 0 1 " + pt(-0.28 * step, rIn) + " Z";
-      return [d, "M9 12a3 3 0 1 0 6 0a3 3 0 1 0-6 0"];
-    })()
+    // Rounded 6-lobe cog outline + center ring (Lucide "settings" shape).
+    // This is an ARRAY of path strings.
+    gear: [
+      "M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z",
+      "M9 12a3 3 0 1 0 6 0a3 3 0 1 0-6 0"
+    ]
   };
   const iconChevron = (d) => icon([PATHS[d]], { stroke: COL_TEXT, sw: 3, size: 10 });
   const iconStar = (on, size) => icon([PATHS.star], { size: size || 12, stroke: COL_TEXT, sw: 2, fill: on ? COL_TEXT : "none" });
@@ -1130,13 +1139,14 @@ function scWidgetInit() {
       display: flex; align-items: flex-end; justify-content: center; gap: 2px; padding-bottom: 8px;
     }
     #sc-widget-test .sc-row-now > span {
-      width: 2px; height: 4px; border-radius: 1px; background: ${COL_TEXT};
+      width: 2px; height: 13px; border-radius: 1px; background: ${COL_TEXT};
+      transform-origin: 50% 100%; will-change: transform;
       animation: sc-bounce 0.8s ease-in-out infinite alternate;
     }
     #sc-widget-test .sc-row-now > span:nth-child(2) { animation-delay: -0.27s; }
     #sc-widget-test .sc-row-now > span:nth-child(3) { animation-delay: -0.54s; }
     #sc-widget-test.sc-paused .sc-row-now > span { animation-play-state: paused; }
-    @keyframes sc-bounce { from { height: 3px; } to { height: 13px; } }
+    @keyframes sc-bounce { from { transform: scaleY(0.23); } to { transform: scaleY(1); } }
 
     #sc-widget-test .sc-empty {
       padding: 18px 8px; text-align: center; color: ${COL_TEXT_FAINT};
@@ -1205,7 +1215,7 @@ function scWidgetInit() {
   const gearBtn = btn("sc-corner", 18, "Settings");
   gearBtn.id = "sc-widget-gear";
   gearBtn.style.left = "6px";
-  gearBtn.appendChild(icon(PATHS.gear, { stroke: COL_TEXT, sw: 1.8, size: 12 }));
+  gearBtn.appendChild(icon(PATHS.gear, { stroke: COL_TEXT, sw: 2, size: 12 }));
   widgetDiv.appendChild(gearBtn);
 
   const minBtn = btn("sc-corner", 18, "Minimize");
@@ -1297,6 +1307,7 @@ function scWidgetInit() {
   eqContainer.style.cssText = `
     display: flex; align-items: flex-end; justify-content: center;
     gap: 2px; width: 100%; height: 18px;
+    contain: layout paint style;
   `;
   const eqBarEls = [];
   for (let i = 0; i < EQ_BAR_COUNT; i++) {
@@ -1446,7 +1457,7 @@ function scWidgetInit() {
 
   const miniEq = el("div");
   miniEq.id = "sc-mini-eq";
-  miniEq.style.cssText = `display: flex; align-items: flex-end; gap: 2px; height: 14px; flex-shrink: 0;`;
+  miniEq.style.cssText = `display: flex; align-items: flex-end; gap: 2px; height: 14px; flex-shrink: 0; contain: layout paint style;`;
   const miniBarEls = [];
   for (let i = 0; i < MINI_BAR_COUNT; i++) {
     const b = el("div");
@@ -1696,6 +1707,8 @@ function scWidgetInit() {
     if (!settings.glow) {
       artworkWrapper.style.boxShadow = "none";
       miniArtWrap.style.boxShadow = "none";
+      glowWrittenFull = "";
+      glowWrittenMini = "";
     }
   }
 
@@ -2049,53 +2062,103 @@ function scWidgetInit() {
     return 0.12 + 0.10 * Math.sin(now / 320 + i * 0.75) + 0.05 * Math.sin(now / 130 + i * 1.9);
   }
 
+  // CPU notes: the audio feed only arrives at ~20 Hz, so drawing the bars
+  // at ~30 fps looks the same as 60+ fps. Smoothing is time-based so the
+  // feel doesn't change with the frame rate, style writes are skipped when
+  // the value didn't change, and the loop goes to sleep when there is
+  // nothing to draw (paused + settled, widget hidden, other panel open).
+  const EQ_FRAME_GAP = 15;     // ms timer before each rAF -> roughly 30 fps
+  const EQ_SLEEP_MS = 200;     // wake-up interval while idle
+  let eqPrevTime = 0;
+  const barH = new Array(EQ_BAR_COUNT).fill("");
+  const barO = new Array(EQ_BAR_COUNT).fill("");
+  const miniH = new Array(MINI_BAR_COUNT).fill("");
+  const miniO = new Array(MINI_BAR_COUNT).fill("");
+  let glowWrittenFull = "";
+  let glowWrittenMini = "";
+
+  function eqSettled() {
+    if (isPlaying || displayGlow > 0.003) return false;
+    for (let i = 0; i < EQ_BAR_COUNT; i++) if (displayBars[i] > 0.003) return false;
+    return true;
+  }
+
+  function eqNext(delay) {
+    setTimeout(() => requestAnimationFrame(animateEq), delay);
+  }
+
   function animateEq() {
-    if (widgetVisible && view === "player") {
-      const now = Date.now();
-      const useReal = (now - lastAudioMsgTime < 400) && (now - lastLoudTime < 1500);
-      const mini = widgetDiv.classList.contains("sc-min");
+    if (!widgetVisible || view !== "player") {
+      eqPrevTime = 0;
+      eqNext(EQ_SLEEP_MS);
+      return;
+    }
 
-      for (let i = 0; i < EQ_BAR_COUNT; i++) {
-        let t;
-        if (useReal) t = targetBars[i] || 0;
-        else if (isPlaying) t = Math.max(0, idleBarValue(i, now));
-        else t = 0;
-        const k = t > displayBars[i] ? 0.7 : 0.25;
-        displayBars[i] += (t - displayBars[i]) * k;
-      }
+    const now = Date.now();
+    const dt = eqPrevTime ? Math.min(100, now - eqPrevTime) : 33;
+    eqPrevTime = now;
+    const f = dt / 16.67;                       // frames @60Hz this step covers
+    const kUp = 1 - Math.pow(1 - 0.7, f);
+    const kDown = 1 - Math.pow(1 - 0.25, f);
+    const kGlow = 1 - Math.pow(1 - 0.15, f);
 
-      if (settings.showEq) {
-        if (!mini) {
-          for (let i = 0; i < EQ_BAR_COUNT; i++) {
-            eqBarEls[i].style.height = (3 + displayBars[i] * 15).toFixed(1) + "px";
-            eqBarEls[i].style.opacity = isMuted ? "0.3" : (0.45 + displayBars[i] * 0.55).toFixed(2);
-          }
-        } else {
-          const per = EQ_BAR_COUNT / MINI_BAR_COUNT;
-          for (let i = 0; i < MINI_BAR_COUNT; i++) {
-            let s = 0, n = 0;
-            for (let j = Math.floor(i * per); j < Math.floor((i + 1) * per); j++) { s += displayBars[j]; n++; }
-            const v = n ? s / n : 0;
-            miniBarEls[i].style.height = (2 + v * 12).toFixed(1) + "px";
-            miniBarEls[i].style.opacity = isMuted ? "0.3" : (0.45 + v * 0.55).toFixed(2);
-          }
+    const useReal = (now - lastAudioMsgTime < 400) && (now - lastLoudTime < 1500);
+    const mini = widgetDiv.classList.contains("sc-min");
+
+    for (let i = 0; i < EQ_BAR_COUNT; i++) {
+      let t;
+      if (useReal) t = targetBars[i] || 0;
+      else if (isPlaying) t = Math.max(0, idleBarValue(i, now));
+      else t = 0;
+      displayBars[i] += (t - displayBars[i]) * (t > displayBars[i] ? kUp : kDown);
+    }
+
+    if (settings.showEq) {
+      if (!mini) {
+        for (let i = 0; i < EQ_BAR_COUNT; i++) {
+          // heights in 0.5px steps, opacity in 0.05 steps: invisible
+          // difference, but most frames now touch far fewer styles.
+          const h = (Math.round((3 + displayBars[i] * 15) * 2) / 2).toFixed(1) + "px";
+          const o = isMuted ? "0.30" : (Math.round((0.45 + displayBars[i] * 0.55) * 20) / 20).toFixed(2);
+          if (barH[i] !== h) { barH[i] = h; eqBarEls[i].style.height = h; }
+          if (barO[i] !== o) { barO[i] = o; eqBarEls[i].style.opacity = o; }
+        }
+      } else {
+        const per = EQ_BAR_COUNT / MINI_BAR_COUNT;
+        for (let i = 0; i < MINI_BAR_COUNT; i++) {
+          let s = 0, n = 0;
+          for (let j = Math.floor(i * per); j < Math.floor((i + 1) * per); j++) { s += displayBars[j]; n++; }
+          const v = n ? s / n : 0;
+          const h = (Math.round((2 + v * 12) * 2) / 2).toFixed(1) + "px";
+          const o = isMuted ? "0.30" : (Math.round((0.45 + v * 0.55) * 20) / 20).toFixed(2);
+          if (miniH[i] !== h) { miniH[i] = h; miniBarEls[i].style.height = h; }
+          if (miniO[i] !== o) { miniO[i] = o; miniBarEls[i].style.opacity = o; }
         }
       }
+    }
 
-      let glowTarget;
-      if (useReal) glowTarget = targetGlow;
-      else if (isPlaying) glowTarget = 0.12 + 0.05 * Math.sin(now / 500);
-      else glowTarget = 0;
-      displayGlow += (glowTarget - displayGlow) * 0.15;
+    let glowTarget;
+    if (useReal) glowTarget = targetGlow;
+    else if (isPlaying) glowTarget = 0.12 + 0.05 * Math.sin(now / 500);
+    else glowTarget = 0;
+    displayGlow += (glowTarget - displayGlow) * kGlow;
 
-      if (settings.glow) {
-        const shadow = "0 0 " + (8 + displayGlow * 26).toFixed(1) + "px rgba(255, 255, 255, " +
-          (0.12 + displayGlow * 0.4).toFixed(2) + ")";
-        if (mini) miniArtWrap.style.boxShadow = shadow;
-        else artworkWrapper.style.boxShadow = shadow;
+    if (settings.glow) {
+      // The blur radius is the expensive part (a new blur has to be
+      // rendered for every distinct radius), so it moves in 3px steps and
+      // gets reused from cache; the alpha is cheap and stays smooth.
+      const rad = 8 + Math.round(displayGlow * 26 / 3) * 3;
+      const alpha = (Math.round((0.12 + displayGlow * 0.4) * 50) / 50).toFixed(2);
+      const shadow = "0 0 " + rad + "px rgba(255, 255, 255, " + alpha + ")";
+      if (mini) {
+        if (shadow !== glowWrittenMini) { glowWrittenMini = shadow; miniArtWrap.style.boxShadow = shadow; }
+      } else if (shadow !== glowWrittenFull) {
+        glowWrittenFull = shadow;
+        artworkWrapper.style.boxShadow = shadow;
       }
     }
-    requestAnimationFrame(animateEq);
+
+    eqNext(eqSettled() ? EQ_SLEEP_MS : EQ_FRAME_GAP);
   }
 
   // =================== TAB MESSAGING ===================
