@@ -1331,8 +1331,8 @@ function scWidgetInit() {
       display: flex; flex-direction: column; gap: 6px; width: 100%; min-width: 0;
       flex: 1 1 auto; min-height: 0;
     }
-    /* settings: sized by its own content (the player height is only a minimum) */
-    #sc-widget-test #sc-settings { justify-content: flex-start; gap: 8px; }
+    /* settings: same height as the player (frozen on open); the card stretches to fill it */
+    #sc-widget-test #sc-settings { justify-content: flex-start; gap: 6px; }
     #sc-widget-test .sc-panel-head {
       display: grid; grid-template-columns: 20px 1fr 20px; align-items: center; gap: 6px;
     }
@@ -1403,34 +1403,33 @@ function scWidgetInit() {
     }
 
     /* ---- settings ---- */
-    #sc-widget-test .sc-sec { display: flex; flex-direction: column; gap: 4px; }
-    #sc-widget-test .sc-sec-label {
-      padding: 0 4px; font-size: 9px; font-weight: 700; letter-spacing: 0.09em;
-      text-transform: uppercase; color: ${COL_TEXT_FAINT};
-    }
+    /* One card; its rows share whatever height the player had, so the panel
+       is always exactly as tall as the player (equalizer on or off). */
     #sc-widget-test .sc-card {
       display: flex; flex-direction: column;
       padding: 0 11px; border-radius: 13px;
       background: ${COL_SURFACE_SOFT};
       box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.07);
     }
+    #sc-widget-test #sc-settings > .sc-card { flex: 1 1 auto; min-height: 0; }
+    #sc-widget-test .sc-card > * { flex: 1 1 0; min-height: 24px; }
     /* hairline dividers between rows instead of loose gaps */
     #sc-widget-test .sc-card > * + * { border-top: 1px solid rgba(255, 255, 255, 0.06); }
     #sc-widget-test .sc-set-row {
       display: flex; align-items: center; justify-content: space-between; gap: 8px;
-      min-height: 27px; cursor: pointer;
+      cursor: pointer;
     }
     #sc-widget-test .sc-set-label { color: ${COL_TEXT_DIM}; font-size: 10.5px; font-weight: 500; transition: color 0.12s ease; }
     #sc-widget-test .sc-set-row:hover .sc-set-label { color: ${COL_TEXT}; }
     #sc-widget-test .sc-set-value {
-      min-width: 28px; padding: 1px 6px; border-radius: 8px; text-align: center;
+      min-width: 28px; padding: 1px 6px; border-radius: 8px; text-align: center; flex-shrink: 0;
       background: ${COL_SURFACE}; font-size: 9.5px; font-weight: 700; font-variant-numeric: tabular-nums;
     }
 
-    /* slider block: label + value on top, track below; dims when the EQ is off */
-    #sc-widget-test .sc-set-slider { display: flex; flex-direction: column; gap: 3px; padding: 5px 0 8px; transition: opacity 0.15s ease; }
+    /* sensitivity: label, slider and value on ONE row; dims when the EQ is off */
+    #sc-widget-test .sc-set-slider { cursor: default; transition: opacity 0.15s ease; }
     #sc-widget-test .sc-set-slider.sc-off { opacity: 0.35; pointer-events: none; }
-    #sc-widget-test .sc-set-slider > .sc-set-row { min-height: 18px; cursor: default; }
+    #sc-widget-test .sc-set-slider > .sc-slider { flex: 1 1 auto; min-width: 24px; margin: 0 2px; }
 
     #sc-widget-test .sc-toggle {
       position: relative; width: 28px; height: 16px; border-radius: 8px; flex-shrink: 0;
@@ -1870,15 +1869,10 @@ function scWidgetInit() {
   // =================== SETTINGS PANEL ===================
   const setPanel = makePanel("sc-settings", el("div", "sc-panel-title", "Settings"));
 
-  // Grouped sections: tiny caption + rounded card with hairline-separated rows
-  function addSection(label) {
-    const sec = el("div", "sc-sec");
-    sec.appendChild(el("div", "sc-sec-label", label));
-    const card = el("div", "sc-card");
-    sec.appendChild(card);
-    setPanel.appendChild(sec);
-    return card;
-  }
+  // One grouped card; the rows stretch to fill the panel (see CSS)
+  const cardLook = el("div", "sc-card");
+  setPanel.appendChild(cardLook);
+  const cardLib = cardLook;
 
   const toggleSyncers = [];
   function addToggle(card, label, key, onChange) {
@@ -1897,16 +1891,11 @@ function scWidgetInit() {
     toggleSyncers.push(sync);
   }
 
-  // Section: visuals
-  const cardLook = addSection("Visuals");
   addToggle(cardLook, "Equalizer", "showEq", applyVisualSettings);
 
-  // Sensitivity sits right under the Equalizer toggle and dims when it is off
-  const sensBlock = el("div", "sc-set-slider");
-  const sensHead = el("div", "sc-set-row");
-  sensHead.appendChild(el("span", "sc-set-label", "Sensitivity"));
-  const sensValue = el("span", "sc-set-value");
-  sensHead.appendChild(sensValue);
+  // Sensitivity: one compact row, right under the Equalizer toggle
+  const sensBlock = el("div", "sc-set-row sc-set-slider");
+  sensBlock.appendChild(el("span", "sc-set-label", "Sensitivity"));
   const slider = el("div", "sc-slider");
   slider.title = "Drag or scroll";
   const sliderTrack = el("div", "sc-slider-track");
@@ -1915,14 +1904,12 @@ function scWidgetInit() {
   const sliderThumb = el("div", "sc-slider-thumb");
   slider.appendChild(sliderTrack);
   slider.appendChild(sliderThumb);
-  sensBlock.appendChild(sensHead);
   sensBlock.appendChild(slider);
+  const sensValue = el("span", "sc-set-value");
+  sensBlock.appendChild(sensValue);
   cardLook.appendChild(sensBlock);
 
   addToggle(cardLook, "Cover glow", "glow", applyVisualSettings);
-
-  // Section: library
-  const cardLib = addSection("Library");
   addToggle(cardLib, "Remember history", "history");
 
   // Footer actions: two equal buttons
@@ -2003,23 +1990,19 @@ function scWidgetInit() {
     // "transitionend" to release it. When start and end were equal - e.g.
     // minimizing - no transition ever fired and the widget stayed tall until
     // some button hover happened to fire one.)
-    // Library: freeze at the player's height (its list scrolls).
-    // Settings: the player height is only a MINIMUM, so the panel can never
-    // be cut off (with the equalizer off the player is ~25px shorter and the
-    // old frozen height clipped the bottom buttons).
+    // Both panels open at exactly the player's current height (no jump).
+    // The settings rows stretch/shrink to fit it, down to the shortest
+    // player (equalizer off), so nothing is ever cut off.
     if (v !== "player" && view === "player" && widgetVisible && !widgetDiv.classList.contains("sc-min")) {
       const h = widgetDiv.getBoundingClientRect().height;
-      if (h > 0) {
-        if (v === "settings") widgetDiv.style.minHeight = Math.round(h) + "px";
-        else widgetDiv.style.height = Math.round(h) + "px";
-      }
+      if (h > 0) widgetDiv.style.height = Math.round(h) + "px";
     }
 
     view = v;
     widgetDiv.classList.toggle("sc-panel-open", v !== "player");
     widgetDiv.classList.toggle("sc-view-library", v === "library");
     widgetDiv.classList.toggle("sc-view-settings", v === "settings");
-    if (v === "player") { widgetDiv.style.height = ""; widgetDiv.style.minHeight = ""; }
+    if (v === "player") widgetDiv.style.height = "";
     if (v === "library") renderLibrary();
     if (v === "settings") syncSettingsUI();
 
