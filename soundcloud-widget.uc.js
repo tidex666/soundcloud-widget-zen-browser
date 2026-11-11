@@ -2339,6 +2339,113 @@ function scWidgetInit() {
     }
   }
 
+  // =================== GLOW LOOK (smart fallback) ===================
+  // The glow is a blurred copy of the cover. That looks great on colourful
+  // covers but fails on some: dark covers vanish into the background, grey
+  // ones have nothing to saturate, near-white ones turn into a milky haze.
+  // So the cover is sampled once (24x24) and, when it is a poor fit, the
+  // glow switches to a single clean colour taken from the cover instead:
+  //   - some colour present   -> that hue, lifted to a visible saturation/lightness
+  //   - no colour at all      -> soft neutral light glow
+  // If the cover can't be read (CORS etc.) the old blurred-cover look stays.
+  const GLOW_LAYERS = [
+    { node: glowEl, blur: 7 },
+    { node: miniGlowEl, blur: 4 }
+  ];
+  const glowLookCache = new Map();
+  let glowRequestUrl = "";
+
+  function rgbToHsl(r, g, b) {
+    const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+    const l = (mx + mn) / 2;
+    const d = mx - mn;
+    if (d === 0) return [0, 0, l];
+    const sat = d / (1 - Math.abs(2 * l - 1));
+    let h;
+    if (mx === r) h = ((g - b) / d) % 6;
+    else if (mx === g) h = (b - r) / d + 2;
+    else h = (r - g) / d + 4;
+    h *= 60;
+    if (h < 0) h += 360;
+    return [h, sat, l];
+  }
+
+  function analyzeCover(url) {
+    return new Promise((resolve) => {
+      let triedFallback = false;
+      const img = new Image();
+      img.crossOrigin = "anonymous";
+      img.onload = () => {
+        try {
+          const N = 24;
+          const cv = document.createElementNS("http://www.w3.org/1999/xhtml", "canvas");
+          cv.width = N; cv.height = N;
+          const ctx = cv.getContext("2d", { willReadFrequently: true });
+          ctx.drawImage(img, 0, 0, N, N);
+          const d = ctx.getImageData(0, 0, N, N).data;
+          let n = 0, lumSum = 0, satSum = 0, wSum = 0, rS = 0, gS = 0, bS = 0;
+          for (let i = 0; i < d.length; i += 4) {
+            if (d[i + 3] < 128) continue;
+            const r = d[i] / 255, g = d[i + 1] / 255, b = d[i + 2] / 255;
+            const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+            const chroma = mx - mn;
+            const sat = mx > 0 ? chroma / mx : 0;
+            n++;
+            lumSum += 0.2126 * r + 0.7152 * g + 0.0722 * b;
+            satSum += sat;
+            // vivid, reasonably bright pixels decide the glow colour
+            const w = chroma * (0.3 + mx);
+            wSum += w; rS += r * w; gS += g * w; bS += b * w;
+          }
+          if (!n) { resolve(null); return; }
+          const avgL = lumSum / n, avgS = satSum / n, colourful = wSum / n;
+
+          // good fit: mid brightness, decent colour -> keep the blurred cover
+          if (avgL >= 0.28 && avgL <= 0.78 && avgS >= 0.22) { resolve({ mode: "image" }); return; }
+
+          if (colourful >= 0.05 && wSum > 0) {
+            const [h, sat] = rgbToHsl(rS / wSum, gS / wSum, bS / wSum);
+            const S = Math.round(Math.min(0.9, Math.max(0.55, sat)) * 100);
+            resolve({ mode: "color", color: "hsl(" + Math.round(h) + " " + S + "% 60%)" });
+          } else {
+            // black / white / grey cover: nothing to tint with
+            resolve({ mode: "color", color: "rgba(232, 236, 246, 0.55)" });
+          }
+        } catch (e) { resolve(null); }
+      };
+      img.onerror = () => {
+        if (!triedFallback && bigArt(url) !== url) { triedFallback = true; img.src = url; return; }
+        resolve(null);
+      };
+      img.src = bigArt(url);
+    });
+  }
+
+  function applyGlowLook(look, url) {
+    for (const g of GLOW_LAYERS) {
+      if (look && look.mode === "color") {
+        g.node.style.backgroundImage = "none";
+        g.node.style.backgroundColor = look.color;
+        g.node.style.filter = "blur(" + g.blur + "px)";
+      } else {
+        g.node.style.backgroundColor = "";
+        g.node.style.filter = "blur(" + g.blur + "px) saturate(1.5) brightness(1.2)";
+        setArt(g.node, url);
+      }
+    }
+  }
+
+  function setGlowArt(url) {
+    glowRequestUrl = url;
+    const cached = glowLookCache.get(url);
+    if (cached !== undefined) { applyGlowLook(cached, url); return; }
+    analyzeCover(url).then((look) => {
+      if (glowLookCache.size > 60) glowLookCache.clear();
+      glowLookCache.set(url, look);
+      if (glowRequestUrl === url) applyGlowLook(look, url); // ignore stale results
+    });
+  }
+
   function updateFromInfo(data) {
     if (!data || !data.found) {
       hideWidget();
@@ -2361,8 +2468,7 @@ function scWidgetInit() {
       lastArtworkUrl = data.artworkUrl;
       setArt(artworkEl, data.artworkUrl);
       setArt(miniArt, data.artworkUrl);
-      setArt(glowEl, data.artworkUrl);
-      setArt(miniGlowEl, data.artworkUrl);
+      setGlowArt(data.artworkUrl);
     }
 
     const t = cleanTrackTitle(data.trackTitle) || "";
