@@ -7,6 +7,19 @@
 // NOTE: keep this file pure ASCII. The loader reads it as Latin-1, so any
 // raw UTF-8 symbol shows up as garbage. Use \uXXXX escapes in strings.
 //
+// v2.2.9
+//  - Fixed: the minimized widget stayed full height until you hovered a
+//    button (the animated height change never finished when start and end
+//    heights were equal). The height animation is gone entirely.
+//  - Pause icon: two identical bars (whole-pixel sizes, no gradients).
+//  - Cover glow no longer gets cut off at the widget edge: it stays inside
+//    the padding and fades out with a mask; a bit softer overall.
+//  - Settings/minimize buttons moved inward, softer hover disc.
+//  - Settings and library open at the same size as the player (no resize,
+//    no animation). Version line removed from settings; library list scrolls.
+//  - EQ sensitivity reworked: soft knee instead of a hard clip, level
+//    expander + transient "punch", slower auto-gain. High values stay lively
+//    instead of pinning every bar at the top. Glow follows the same curve.
 // v2.2.8
 //  - Cover glow is now a blurred copy of the cover behind it (the colours
 //    of the art) instead of a white box-shadow halo. The blur is rendered
@@ -1001,7 +1014,7 @@ function scFrameScript(EQ_BAR_COUNT) {
 // =====================================================================
 // CHROME SIDE (the widget itself)
 // =====================================================================
-const SC_WIDGET_VERSION = "2.2.8";
+const SC_WIDGET_VERSION = "2.2.9";
 
 function scWidgetInit() {
   if (document.getElementById("sc-widget-test")) return;
@@ -1258,8 +1271,10 @@ function scWidgetInit() {
     /* solid buttons stay solid on hover (the dark icon needs the contrast) */
     #sc-widget-test .sc-btn.sc-inv:hover { background-color: #fff !important; transform: scale(1.05); }
     #sc-widget-test .sc-btn.sc-inv:active { transform: scale(0.94); }
-    #sc-widget-test .sc-corner { position: absolute; top: 7px; z-index: 2; opacity: 0.4; background-color: transparent; }
+    #sc-widget-test .sc-corner { position: absolute; top: 11px; z-index: 2; opacity: 0.4; background-color: transparent; }
     #sc-widget-test:hover .sc-corner { opacity: 1; }
+    /* softer hover disc; the buttons sit well inside the rounded corner now */
+    #sc-widget-test .sc-corner:hover { background-color: ${COL_SURFACE} !important; }
     #sc-widget-test .sc-btn.sc-disabled { opacity: 0.35; pointer-events: none; }
 
     /* ---- views ---- */
@@ -1311,7 +1326,12 @@ function scWidgetInit() {
     #sc-widget-test .sc-pop { animation: sc-pop 0.3s ease; }
 
     /* ---- panels (library / settings) ---- */
-    #sc-widget-test .sc-panel { display: flex; flex-direction: column; gap: 8px; width: 100%; min-width: 0; }
+    #sc-widget-test .sc-panel {
+      display: flex; flex-direction: column; gap: 6px; width: 100%; min-width: 0;
+      flex: 1 1 auto; min-height: 0;
+    }
+    /* settings: spread over the player's height instead of growing it */
+    #sc-widget-test #sc-settings { justify-content: space-between; }
     #sc-widget-test .sc-panel-head {
       display: grid; grid-template-columns: 20px 1fr 20px; align-items: center; gap: 6px;
     }
@@ -1331,6 +1351,7 @@ function scWidgetInit() {
 
     #sc-widget-test .sc-list {
       display: flex; flex-direction: column; gap: 2px;
+      flex: 1 1 auto; min-height: 0;
       max-height: 222px; overflow-y: auto; overflow-x: hidden;
       margin: 0 -6px; padding: 0 6px;
       scrollbar-width: thin; scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
@@ -1382,8 +1403,8 @@ function scWidgetInit() {
 
     /* ---- settings ---- */
     #sc-widget-test .sc-card {
-      display: flex; flex-direction: column; gap: 9px;
-      padding: 10px 12px; border-radius: 14px;
+      display: flex; flex-direction: column; gap: 7px;
+      padding: 8px 12px; border-radius: 14px;
       background: ${COL_SURFACE_SOFT};
     }
     #sc-widget-test .sc-set-row {
@@ -1444,20 +1465,19 @@ function scWidgetInit() {
     #sc-widget-test .sc-pill.sc-armed { background: rgba(255, 99, 90, 0.22) !important; color: #ff8d86; }
     #sc-widget-test .sc-pill-row { display: flex; flex-wrap: wrap; gap: 6px; }
     #sc-widget-test .sc-pill-row > .sc-pill { flex: 1 1 88px; min-width: 0; }
-    #sc-widget-test .sc-version { text-align: center; font-size: 9px; color: ${COL_TEXT_FAINT}; }
   `;
   widgetDiv.appendChild(styleTag);
 
   // =================== CORNER BUTTONS ===================
   const gearBtn = btn("sc-corner", 18, "Settings");
   gearBtn.id = "sc-widget-gear";
-  gearBtn.style.left = "6px";
+  gearBtn.style.left = "12px";
   gearBtn.appendChild(icon(PATHS.gear, { stroke: COL_TEXT, sw: 2, size: 12 }));
   widgetDiv.appendChild(gearBtn);
 
   const minBtn = btn("sc-corner", 18, "Minimize");
   minBtn.id = "sc-widget-minbtn";
-  minBtn.style.right = "6px";
+  minBtn.style.right = "12px";
   minBtn.appendChild(iconChevron("down"));
   widgetDiv.appendChild(minBtn);
 
@@ -1498,10 +1518,17 @@ function scWidgetInit() {
   // takes the colours of the art instead of being a white halo. The blur is
   // rendered once per cover; the audio only changes the opacity (cheap).
   const glowEl = el("div");
+  // The widget clips everything at its padding edge, and the old glow
+  // (blur 11px, 3px outside the cover) reached further than the 10px top
+  // padding, so it was cut off in a hard line. Now the layer stays inside
+  // the padding (9px) and a mask fades it to nothing before its own edge.
   glowEl.style.cssText = `
-    position: absolute; inset: -3px; border-radius: 14px; z-index: -1; pointer-events: none;
+    position: absolute; inset: -9px; z-index: -1; pointer-events: none;
     background-size: cover; background-position: center;
-    filter: blur(11px); opacity: 0; will-change: opacity;
+    filter: blur(9px); opacity: 0; will-change: opacity;
+    mask-image: linear-gradient(90deg, transparent 0%, #000 24%, #000 76%, transparent 100%),
+                linear-gradient(180deg, transparent 0%, #000 24%, #000 76%, transparent 100%);
+    mask-composite: intersect;
   `;
   artworkWrapper.insertBefore(glowEl, artClip);
 
@@ -1723,9 +1750,12 @@ function scWidgetInit() {
 
   const miniGlowEl = el("div");
   miniGlowEl.style.cssText = `
-    position: absolute; inset: -2px; border-radius: 10px; z-index: -1; pointer-events: none;
+    position: absolute; inset: -6px; z-index: -1; pointer-events: none;
     background-size: cover; background-position: center;
-    filter: blur(6px); opacity: 0; will-change: opacity;
+    filter: blur(5px); opacity: 0; will-change: opacity;
+    mask-image: linear-gradient(90deg, transparent 0%, #000 26%, #000 74%, transparent 100%),
+                linear-gradient(180deg, transparent 0%, #000 26%, #000 74%, transparent 100%);
+    mask-composite: intersect;
   `;
   miniArtWrap.insertBefore(miniGlowEl, miniArtClip);
 
@@ -1866,7 +1896,6 @@ function scWidgetInit() {
   pillRow.appendChild(clearHistBtn);
   pillRow.appendChild(resetBtn);
   setPanel.appendChild(pillRow);
-  setPanel.appendChild(el("div", "sc-version", "SoundCloud Widget v" + SC_WIDGET_VERSION));
 
   // Slider logic
   function setSliderUI() {
@@ -1929,37 +1958,28 @@ function scWidgetInit() {
 
   // =================== VIEW STATE ===================
   let view = "player";
-  let viewHeightCleanup = null;
   function setView(v) {
-    // The player/library/settings panels are different heights, so
-    // swapping which one is visible used to snap the widget's height
-    // instantly. Measure before/after and transition between them instead.
-    if (viewHeightCleanup) { viewHeightCleanup(); viewHeightCleanup = null; }
-    const startH = widgetDiv.getBoundingClientRect().height;
+    // No height animation. Opening settings/library freezes the widget at
+    // the height the player had, and the panels are laid out to fit inside
+    // it (the library list scrolls), so nothing resizes. Going back to the
+    // player releases the height again.
+    // (The old animated version pinned an inline height and waited for a
+    // "transitionend" to release it. When start and end were equal - e.g.
+    // minimizing - no transition ever fired and the widget stayed tall until
+    // some button hover happened to fire one.)
+    if (v !== "player" && view === "player" && widgetVisible && !widgetDiv.classList.contains("sc-min")) {
+      const h = widgetDiv.getBoundingClientRect().height;
+      if (h > 0) widgetDiv.style.height = Math.round(h) + "px";
+    }
 
     view = v;
     widgetDiv.classList.toggle("sc-panel-open", v !== "player");
     widgetDiv.classList.toggle("sc-view-library", v === "library");
     widgetDiv.classList.toggle("sc-view-settings", v === "settings");
+    if (v === "player") widgetDiv.style.height = "";
     if (v === "library") renderLibrary();
     if (v === "settings") syncSettingsUI();
 
-    if (startH > 0 && widgetDiv.style.display !== "none") {
-      widgetDiv.style.height = startH + "px";
-      requestAnimationFrame(() => {
-        const endH = widgetDiv.scrollHeight;
-        widgetDiv.style.transition = "height 0.18s ease";
-        widgetDiv.style.height = endH + "px";
-      });
-      const clear = () => {
-        widgetDiv.style.transition = "";
-        widgetDiv.style.height = "";
-        widgetDiv.removeEventListener("transitionend", clear);
-        if (viewHeightCleanup === clear) viewHeightCleanup = null;
-      };
-      widgetDiv.addEventListener("transitionend", clear);
-      viewHeightCleanup = clear;
-    }
     requestAnimationFrame(refreshAllMarquees);
   }
   gearBtn.addEventListener("click", () => setView("settings"));
@@ -2242,23 +2262,32 @@ function scWidgetInit() {
   }
   setVolUI();
 
+  // Whole-pixel sizes only: the old pause icon was two gradients at
+  // fractional sizes (e.g. 7.8px wide, 2.4px bars at the small scale), which
+  // snapped to different widths so one bar looked bigger than the other.
   function setPlayIcon(node, s) {
+    node.textContent = "";
     node.style.cssText = `
       width: 0; height: 0;
-      border-top: ${8 * s}px solid transparent;
-      border-bottom: ${8 * s}px solid transparent;
-      border-left: ${13 * s}px solid ${COL_BG};
-      margin-left: ${3 * s}px;
+      border-top: ${Math.round(8 * s)}px solid transparent;
+      border-bottom: ${Math.round(8 * s)}px solid transparent;
+      border-left: ${Math.round(13 * s)}px solid ${COL_BG};
+      margin-left: ${Math.round(3 * s)}px;
     `;
   }
   function setPauseIcon(node, s) {
-    const w = 13 * s, h = 14 * s, b = 4 * s;
+    const bw = Math.max(2, Math.round(4 * s));      // bar width
+    const gap = Math.max(2, Math.round(3.5 * s));   // gap between bars
+    const h = Math.max(6, Math.round(14 * s));      // bar height
+    node.textContent = "";
     node.style.cssText = `
-      width: ${w}px; height: ${h}px;
-      background:
-        linear-gradient(${COL_BG}, ${COL_BG}) 0 0 / ${b}px ${h}px no-repeat,
-        linear-gradient(${COL_BG}, ${COL_BG}) ${w - b}px 0 / ${b}px ${h}px no-repeat;
+      display: flex; gap: ${gap}px; width: ${bw * 2 + gap}px; height: ${h}px; margin: 0;
     `;
+    for (let i = 0; i < 2; i++) {
+      const bar = document.createElement("span");
+      bar.style.cssText = `display: block; width: ${bw}px; height: ${h}px; border-radius: 1px; background: ${COL_BG}; flex: none;`;
+      node.appendChild(bar);
+    }
   }
 
   function updateFavButton() {
@@ -2373,6 +2402,8 @@ function scWidgetInit() {
   let lastAudioMsgTime = 0;
   let lastLoudTime = 0;
   let agcPeak = 0.5;
+  let lvlPeak = 0.1;
+  const avgBars = new Array(EQ_BAR_COUNT).fill(0);
 
   function idleBarValue(i, now) {
     return 0.12 + 0.10 * Math.sin(now / 320 + i * 0.75) + 0.05 * Math.sin(now / 130 + i * 1.9);
@@ -2463,7 +2494,7 @@ function scWidgetInit() {
       // The glow is a blurred copy of the cover (blurred once, when the art
       // changes); only its opacity follows the music, which is cheap. Fully
       // off when nothing plays, so the glass around the cover stays clean.
-      const o = (Math.round(Math.min(1, displayGlow * 0.85) * 40) / 40).toFixed(2);
+      const o = (Math.round(Math.min(1, displayGlow) * 0.65 * 40) / 40).toFixed(2);
       if (mini) {
         if (o !== glowWrittenMini) { glowWrittenMini = o; miniGlowEl.style.opacity = o; }
       } else if (o !== glowWrittenFull) {
@@ -2672,15 +2703,35 @@ function scWidgetInit() {
     const now = Date.now();
     lastAudioMsgTime = now;
     const raw = msg.data.bars || new Array(EQ_BAR_COUNT).fill(0);
-    // Auto-gain: quiet tracks get boosted so the bars always move.
+    // Auto-gain, slow release (~9 s): quiet tracks still get lifted, but loud
+    // and quiet passages keep different heights.
     let peak = 0;
     for (const v of raw) if (v > peak) peak = v;
-    agcPeak = Math.max(peak, agcPeak * 0.985, 0.2);
-    const gain = settings.sensitivity / agcPeak;
-    targetBars = raw.map((v) => Math.min(1, Math.pow(Math.min(1, v * gain * 0.75), 1.15)));
+    agcPeak = Math.max(peak, agcPeak * 0.994, 0.2);
+
+    // Sensitivity is a gain in front of a SOFT knee (1 - e^-x), not a hard
+    // clip. The old version multiplied by sensitivity and clamped at 1, so
+    // anything above ~2x pushed every bar to the ceiling and the EQ stopped
+    // moving. Now higher values just make it livelier:
+    //  - level^1.6 keeps dips low, so bars fall between beats
+    //  - "punch" = how far a bar is above its own recent average, which
+    //    makes hits and transients jump out
+    const g = 0.7 + settings.sensitivity * 0.8;
+    const out = new Array(raw.length);
+    for (let i = 0; i < raw.length; i++) {
+      const n = Math.min(1, raw[i] / agcPeak);
+      avgBars[i] += (n - avgBars[i]) * 0.1;
+      const punch = Math.max(0, n - avgBars[i]);
+      out[i] = 1 - Math.exp(-(Math.pow(n, 1.6) + punch * 1.2) * g);
+    }
+    targetBars = out;
+
+    // Glow: same idea, relative to the recent loudest level, soft-saturated.
     const lvl = typeof msg.data.level === "number" ? msg.data.level : 0;
-    targetGlow = Math.min(1, lvl * 2.2 * settings.sensitivity / Math.max(agcPeak, 0.3));
-    if (targetGlow > 0.004) lastLoudTime = now;
+    lvlPeak = Math.max(lvl, lvlPeak * 0.994, 0.03);
+    const ln = Math.min(1, lvl / lvlPeak);
+    targetGlow = 1 - Math.exp(-ln * ln * g * 0.8);
+    if (lvl > 0.002) lastLoudTime = now;
   });
 
   pollInfo();
