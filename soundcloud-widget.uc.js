@@ -13,7 +13,8 @@
 //    heights were equal). The height animation is gone entirely.
 //  - Pause icon: two identical bars (whole-pixel sizes, no gradients).
 //  - Cover glow no longer gets cut off at the widget edge: it stays inside
-//    the padding and fades out with a mask; a bit softer overall.
+//    the padding and fades out with a mask; colours are boosted a little
+//    (saturation/brightness) so it stays clearly visible.
 //  - Settings/minimize buttons moved inward, softer hover disc.
 //  - Settings and library open at the same size as the player (no resize,
 //    no animation). Version line removed from settings; library list scrolls.
@@ -1523,11 +1524,11 @@ function scWidgetInit() {
   // padding, so it was cut off in a hard line. Now the layer stays inside
   // the padding (9px) and a mask fades it to nothing before its own edge.
   glowEl.style.cssText = `
-    position: absolute; inset: -9px; z-index: -1; pointer-events: none;
+    position: absolute; inset: -10px; z-index: -1; pointer-events: none;
     background-size: cover; background-position: center;
-    filter: blur(9px); opacity: 0; will-change: opacity;
-    mask-image: linear-gradient(90deg, transparent 0%, #000 24%, #000 76%, transparent 100%),
-                linear-gradient(180deg, transparent 0%, #000 24%, #000 76%, transparent 100%);
+    filter: blur(7px) saturate(1.5) brightness(1.2); opacity: 0; will-change: opacity;
+    mask-image: linear-gradient(90deg, transparent 0%, #000 18%, #000 82%, transparent 100%),
+                linear-gradient(180deg, transparent 0%, #000 18%, #000 82%, transparent 100%);
     mask-composite: intersect;
   `;
   artworkWrapper.insertBefore(glowEl, artClip);
@@ -1752,9 +1753,9 @@ function scWidgetInit() {
   miniGlowEl.style.cssText = `
     position: absolute; inset: -6px; z-index: -1; pointer-events: none;
     background-size: cover; background-position: center;
-    filter: blur(5px); opacity: 0; will-change: opacity;
-    mask-image: linear-gradient(90deg, transparent 0%, #000 26%, #000 74%, transparent 100%),
-                linear-gradient(180deg, transparent 0%, #000 26%, #000 74%, transparent 100%);
+    filter: blur(4px) saturate(1.5) brightness(1.2); opacity: 0; will-change: opacity;
+    mask-image: linear-gradient(90deg, transparent 0%, #000 22%, #000 78%, transparent 100%),
+                linear-gradient(180deg, transparent 0%, #000 22%, #000 78%, transparent 100%);
     mask-composite: intersect;
   `;
   miniArtWrap.insertBefore(miniGlowEl, miniArtClip);
@@ -2494,7 +2495,7 @@ function scWidgetInit() {
       // The glow is a blurred copy of the cover (blurred once, when the art
       // changes); only its opacity follows the music, which is cheap. Fully
       // off when nothing plays, so the glass around the cover stays clean.
-      const o = (Math.round(Math.min(1, displayGlow) * 0.65 * 40) / 40).toFixed(2);
+      const o = (Math.round(Math.min(1, displayGlow) * 40) / 40).toFixed(2);
       if (mini) {
         if (o !== glowWrittenMini) { glowWrittenMini = o; miniGlowEl.style.opacity = o; }
       } else if (o !== glowWrittenFull) {
@@ -2730,7 +2731,7 @@ function scWidgetInit() {
     const lvl = typeof msg.data.level === "number" ? msg.data.level : 0;
     lvlPeak = Math.max(lvl, lvlPeak * 0.994, 0.03);
     const ln = Math.min(1, lvl / lvlPeak);
-    targetGlow = 1 - Math.exp(-ln * ln * g * 0.8);
+    targetGlow = 1 - Math.exp(-Math.pow(ln, 1.2) * g * 1.1);
     if (lvl > 0.002) lastLoudTime = now;
   });
 
