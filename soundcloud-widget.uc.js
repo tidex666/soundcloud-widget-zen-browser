@@ -1331,8 +1331,8 @@ function scWidgetInit() {
       display: flex; flex-direction: column; gap: 6px; width: 100%; min-width: 0;
       flex: 1 1 auto; min-height: 0;
     }
-    /* settings: spread over the player's height instead of growing it */
-    #sc-widget-test #sc-settings { justify-content: space-between; }
+    /* settings: sized by its own content (the player height is only a minimum) */
+    #sc-widget-test #sc-settings { justify-content: flex-start; gap: 8px; }
     #sc-widget-test .sc-panel-head {
       display: grid; grid-template-columns: 20px 1fr 20px; align-items: center; gap: 6px;
     }
@@ -1403,44 +1403,60 @@ function scWidgetInit() {
     }
 
     /* ---- settings ---- */
-    #sc-widget-test .sc-card {
-      display: flex; flex-direction: column; gap: 7px;
-      padding: 8px 12px; border-radius: 14px;
-      background: ${COL_SURFACE_SOFT};
+    #sc-widget-test .sc-sec { display: flex; flex-direction: column; gap: 4px; }
+    #sc-widget-test .sc-sec-label {
+      padding: 0 4px; font-size: 9px; font-weight: 700; letter-spacing: 0.09em;
+      text-transform: uppercase; color: ${COL_TEXT_FAINT};
     }
+    #sc-widget-test .sc-card {
+      display: flex; flex-direction: column;
+      padding: 0 11px; border-radius: 13px;
+      background: ${COL_SURFACE_SOFT};
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.07);
+    }
+    /* hairline dividers between rows instead of loose gaps */
+    #sc-widget-test .sc-card > * + * { border-top: 1px solid rgba(255, 255, 255, 0.06); }
     #sc-widget-test .sc-set-row {
       display: flex; align-items: center; justify-content: space-between; gap: 8px;
-      min-height: 16px; cursor: pointer;
+      min-height: 27px; cursor: pointer;
     }
-    #sc-widget-test .sc-set-label { color: ${COL_TEXT_DIM}; font-size: 10.5px; }
+    #sc-widget-test .sc-set-label { color: ${COL_TEXT_DIM}; font-size: 10.5px; font-weight: 500; transition: color 0.12s ease; }
     #sc-widget-test .sc-set-row:hover .sc-set-label { color: ${COL_TEXT}; }
-    #sc-widget-test .sc-set-value { font-size: 10px; font-weight: 600; font-variant-numeric: tabular-nums; }
+    #sc-widget-test .sc-set-value {
+      min-width: 28px; padding: 1px 6px; border-radius: 8px; text-align: center;
+      background: ${COL_SURFACE}; font-size: 9.5px; font-weight: 700; font-variant-numeric: tabular-nums;
+    }
+
+    /* slider block: label + value on top, track below; dims when the EQ is off */
+    #sc-widget-test .sc-set-slider { display: flex; flex-direction: column; gap: 3px; padding: 5px 0 8px; transition: opacity 0.15s ease; }
+    #sc-widget-test .sc-set-slider.sc-off { opacity: 0.35; pointer-events: none; }
+    #sc-widget-test .sc-set-slider > .sc-set-row { min-height: 18px; cursor: default; }
 
     #sc-widget-test .sc-toggle {
-      position: relative; width: 24px; height: 14px; border-radius: 7px; flex-shrink: 0;
-      background: ${COL_TRACK}; transition: background-color 0.15s ease;
+      position: relative; width: 28px; height: 16px; border-radius: 8px; flex-shrink: 0;
+      background: ${COL_TRACK}; transition: background-color 0.18s ease;
     }
     #sc-widget-test .sc-toggle::after {
       content: ""; position: absolute; top: 2px; left: 2px;
-      width: 10px; height: 10px; border-radius: 50%;
-      background: ${COL_TEXT_DIM};
-      transition: transform 0.15s ease, background-color 0.15s ease;
+      width: 12px; height: 12px; border-radius: 50%;
+      background: ${COL_TEXT}; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+      transition: transform 0.18s ease;
     }
-    #sc-widget-test .sc-toggle.sc-on { background: ${COL_TEXT}; }
-    #sc-widget-test .sc-toggle.sc-on::after { transform: translateX(10px); background: ${COL_BG}; }
+    #sc-widget-test .sc-toggle.sc-on { background: rgba(255, 255, 255, 0.92); }
+    #sc-widget-test .sc-toggle.sc-on::after { transform: translateX(12px); background: ${COL_BG}; box-shadow: none; }
 
-    #sc-widget-test .sc-slider { position: relative; height: 12px; cursor: pointer; margin: 0 5px; }
+    #sc-widget-test .sc-slider { position: relative; height: 14px; cursor: pointer; margin: 0 6px; }
     #sc-widget-test .sc-slider-track {
-      position: absolute; left: 0; right: 0; top: 4px; height: 4px; border-radius: 2px; background: ${COL_TRACK};
+      position: absolute; left: 0; right: 0; top: 5px; height: 4px; border-radius: 2px; background: ${COL_TRACK};
     }
     #sc-widget-test .sc-slider-fill { height: 100%; border-radius: 2px; background: ${COL_TEXT}; }
     #sc-widget-test .sc-slider-thumb {
-      position: absolute; top: 1px; width: 10px; height: 10px; margin-left: -5px;
-      border-radius: 50%; background: ${COL_TEXT}; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+      position: absolute; top: 1px; width: 12px; height: 12px; margin-left: -6px;
+      border-radius: 50%; background: ${COL_TEXT}; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
       transition: transform 0.1s ease;
     }
     #sc-widget-test .sc-slider:hover .sc-slider-thumb,
-    #sc-widget-test .sc-slider.sc-dragging .sc-slider-thumb { transform: scale(1.2); }
+    #sc-widget-test .sc-slider.sc-dragging .sc-slider-thumb { transform: scale(1.15); }
 
     /* ---- volume (slides over the time text on hover) ---- */
     #sc-widget-test .sc-timerow { position: relative; }
@@ -1466,6 +1482,13 @@ function scWidgetInit() {
     #sc-widget-test .sc-pill.sc-armed { background: rgba(255, 99, 90, 0.22) !important; color: #ff8d86; }
     #sc-widget-test .sc-pill-row { display: flex; flex-wrap: wrap; gap: 6px; }
     #sc-widget-test .sc-pill-row > .sc-pill { flex: 1 1 88px; min-width: 0; }
+    #sc-widget-test .sc-pill.sc-disabled { opacity: 0.35; pointer-events: none; }
+    #sc-widget-test .sc-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+    #sc-widget-test .sc-actions > .sc-pill {
+      height: 26px; padding: 0 8px; border-radius: 10px; min-width: 0;
+      background: ${COL_SURFACE_SOFT}; box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.07);
+      text-align: center;
+    }
   `;
   widgetDiv.appendChild(styleTag);
 
@@ -1847,28 +1870,15 @@ function scWidgetInit() {
   // =================== SETTINGS PANEL ===================
   const setPanel = makePanel("sc-settings", el("div", "sc-panel-title", "Settings"));
 
-  // Card: visuals
-  const cardLook = el("div", "sc-card");
-  const sensHead = el("div", "sc-set-row");
-  sensHead.style.cursor = "default";
-  sensHead.appendChild(el("span", "sc-set-label", "EQ sensitivity"));
-  const sensValue = el("span", "sc-set-value");
-  sensHead.appendChild(sensValue);
-  const slider = el("div", "sc-slider");
-  slider.title = "Drag or scroll";
-  const sliderTrack = el("div", "sc-slider-track");
-  const sliderFill = el("div", "sc-slider-fill");
-  sliderTrack.appendChild(sliderFill);
-  const sliderThumb = el("div", "sc-slider-thumb");
-  slider.appendChild(sliderTrack);
-  slider.appendChild(sliderThumb);
-  cardLook.appendChild(sensHead);
-  cardLook.appendChild(slider);
-  setPanel.appendChild(cardLook);
-
-  // Card: library
-  const cardLib = el("div", "sc-card");
-  setPanel.appendChild(cardLib);
+  // Grouped sections: tiny caption + rounded card with hairline-separated rows
+  function addSection(label) {
+    const sec = el("div", "sc-sec");
+    sec.appendChild(el("div", "sc-sec-label", label));
+    const card = el("div", "sc-card");
+    sec.appendChild(card);
+    setPanel.appendChild(sec);
+    return card;
+  }
 
   const toggleSyncers = [];
   function addToggle(card, label, key, onChange) {
@@ -1887,11 +1897,36 @@ function scWidgetInit() {
     toggleSyncers.push(sync);
   }
 
+  // Section: visuals
+  const cardLook = addSection("Visuals");
   addToggle(cardLook, "Equalizer", "showEq", applyVisualSettings);
+
+  // Sensitivity sits right under the Equalizer toggle and dims when it is off
+  const sensBlock = el("div", "sc-set-slider");
+  const sensHead = el("div", "sc-set-row");
+  sensHead.appendChild(el("span", "sc-set-label", "Sensitivity"));
+  const sensValue = el("span", "sc-set-value");
+  sensHead.appendChild(sensValue);
+  const slider = el("div", "sc-slider");
+  slider.title = "Drag or scroll";
+  const sliderTrack = el("div", "sc-slider-track");
+  const sliderFill = el("div", "sc-slider-fill");
+  sliderTrack.appendChild(sliderFill);
+  const sliderThumb = el("div", "sc-slider-thumb");
+  slider.appendChild(sliderTrack);
+  slider.appendChild(sliderThumb);
+  sensBlock.appendChild(sensHead);
+  sensBlock.appendChild(slider);
+  cardLook.appendChild(sensBlock);
+
   addToggle(cardLook, "Cover glow", "glow", applyVisualSettings);
+
+  // Section: library
+  const cardLib = addSection("Library");
   addToggle(cardLib, "Remember history", "history");
 
-  const pillRow = el("div", "sc-pill-row");
+  // Footer actions: two equal buttons
+  const pillRow = el("div", "sc-actions");
   const clearHistBtn = el("button", "sc-pill");
   const resetBtn = el("button", "sc-pill", "Reset settings");
   pillRow.appendChild(clearHistBtn);
@@ -1968,16 +2003,23 @@ function scWidgetInit() {
     // "transitionend" to release it. When start and end were equal - e.g.
     // minimizing - no transition ever fired and the widget stayed tall until
     // some button hover happened to fire one.)
+    // Library: freeze at the player's height (its list scrolls).
+    // Settings: the player height is only a MINIMUM, so the panel can never
+    // be cut off (with the equalizer off the player is ~25px shorter and the
+    // old frozen height clipped the bottom buttons).
     if (v !== "player" && view === "player" && widgetVisible && !widgetDiv.classList.contains("sc-min")) {
       const h = widgetDiv.getBoundingClientRect().height;
-      if (h > 0) widgetDiv.style.height = Math.round(h) + "px";
+      if (h > 0) {
+        if (v === "settings") widgetDiv.style.minHeight = Math.round(h) + "px";
+        else widgetDiv.style.height = Math.round(h) + "px";
+      }
     }
 
     view = v;
     widgetDiv.classList.toggle("sc-panel-open", v !== "player");
     widgetDiv.classList.toggle("sc-view-library", v === "library");
     widgetDiv.classList.toggle("sc-view-settings", v === "settings");
-    if (v === "player") widgetDiv.style.height = "";
+    if (v === "player") { widgetDiv.style.height = ""; widgetDiv.style.minHeight = ""; }
     if (v === "library") renderLibrary();
     if (v === "settings") syncSettingsUI();
 
@@ -2017,6 +2059,7 @@ function scWidgetInit() {
 
   function applyVisualSettings() {
     widgetDiv.classList.toggle("sc-no-eq", !settings.showEq);
+    sensBlock.classList.toggle("sc-off", !settings.showEq);
     if (!settings.glow) {
       glowEl.style.opacity = "0";
       miniGlowEl.style.opacity = "0";
